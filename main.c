@@ -5,6 +5,8 @@
 #include <nrfx_uarte.h>
 #include <sys/stat.h>
 
+#define LED (1 << 15) // the blue led on the nice!nano
+
 /* Dummy implementations to satisfy the linker and silence warnings */
 int _close(int file) { return -1; }
 int _fstat(int file, struct stat *st) { return -1; }
@@ -63,6 +65,22 @@ int _write(int handle, char *buffer, int size) {
 // hook for clock init callback.
 void clock_handler(nrfx_clock_evt_type_t event) {}
 
+void delay_ms(uint32_t ms) {
+    uint32_t count = ms * (64000000 / 1000 / 4);
+    for (volatile uint32_t i = 0; i < count; i++) {
+        __NOP(); // No-operation instruction to prevent compiler from optimizing the loop away
+    }
+}
+
+void blink(int n) {
+	for(int i = n-1; i >= 0; i--) {
+		NRF_P0->OUT |= LED; // ON
+		delay_ms(33);
+		NRF_P0->OUT &= ~LED; // OFF
+		if(i) delay_ms(33);
+	}
+}
+
 // entry point
 void main(void) {
 	// Relocate the interrupt vector table to the app start address for UF2
@@ -73,9 +91,12 @@ void main(void) {
 	assert(err == NRFX_SUCCESS);
 	nrfx_clock_start(NRF_CLOCK_DOMAIN_LFCLK);
 
-	// setup UARTE
-	err = nrfx_uarte_init(&uart, &uart_config, NULL);
-	assert(err == NRFX_SUCCESS);
+	// blink fast
+	NRF_P0->DIRSET = LED;
+	NRF_P0->OUTCLR = LED;
+	blink(100);
 
-	printf("Hi from nrf52840!\n");
+	// go back to uf2 bootloader
+	NRF_POWER->GPREGRET = 0x57; // 0x57 tells the Adafruit UF2 bootloader to stay in bootloader mode
+	NVIC_SystemReset();         // Reboot the chip
 }
