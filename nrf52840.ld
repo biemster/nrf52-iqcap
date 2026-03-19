@@ -30,6 +30,10 @@ SECTIONS {
         *(.glue_7*)
         *(.glue_7t*)
         *(.eh_frame*)
+        *(.ARM.extab* .gnu.linkonce.armextab.*)
+        __exidx_start = .;
+        *(.ARM.exidx* .gnu.linkonce.armexidx.*)
+        __exidx_end = .;
         KEEP(*(.init*))
         KEEP(*(.fini*))
         . = ALIGN(4);

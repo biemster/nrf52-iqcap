@@ -1,11 +1,11 @@
 TARGET = main.elf
 
-CROSS_COMPILE = arm-none-eabi-
-CC = $(CROSS_COMPILE)gcc
-OBJCOPY = $(CROSS_COMPILE)objcopy
-AR = $(CROSS_COMPILE)ar
-SIZE = $(CROSS_COMPILE)size
-GDB = $(CROSS_COMPILE)gdb
+COMPILER_PREFIX = arm-none-eabi-
+CC = $(COMPILER_PREFIX)gcc
+OBJCOPY = $(COMPILER_PREFIX)objcopy
+AR = $(COMPILER_PREFIX)ar
+SIZE = $(COMPILER_PREFIX)size
+GDB = $(COMPILER_PREFIX)gdb
 GDBADDR = localhost
 GDBPORT = 3333
 TTY = $(firstword $(wildcard /dev/ttyACM* /dev/ttyUSB*))
