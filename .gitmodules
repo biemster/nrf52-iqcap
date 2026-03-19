@@ -4,3 +4,6 @@
 [submodule "nrfx"]
 	path = nrfx
 	url = https://github.com/NordicSemiconductor/nrfx
+[submodule "tinyusb"]
+	path = tinyusb
+	url = git@github.com:hathach/tinyusb.git

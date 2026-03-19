@@ -8,7 +8,16 @@ SIZE = $(COMPILER_PREFIX)size
 UF2 = ~/temp/uf2/utils/uf2conv.py
 
 SRC += $(wildcard *.c *.s *.S)
-SRC += $(wildcard nrfx/drivers/src/*.c)
+
+SRC += nrfx/drivers/src/nrfx_clock.c
+SRC += nrfx/drivers/src/nrfx_power.c
+
+SRC += tinyusb/src/tusb.c
+SRC += tinyusb/src/common/tusb_fifo.c
+SRC += tinyusb/src/device/usbd.c
+SRC += tinyusb/src/device/usbd_control.c
+SRC += tinyusb/src/class/vendor/vendor_device.c
+SRC += tinyusb/src/portable/nordic/nrf5x/dcd_nrf5x.c
 
 INC += .
 INC += cmsis/CMSIS/Core/Include
@@ -16,6 +25,7 @@ INC += nrfx
 INC += nrfx/drivers/include
 INC += nrfx/mdk # close enough to GCC
 INC += nrfx/templates # use as is
+INC += tinyusb/src
 
 LIB += m
 LIB += c
@@ -37,10 +47,11 @@ else
 override CFLAGS += -Os
 override CFLAGS += -flto
 endif
+
 override CFLAGS += -DNRF52840_XXAA
 override CFLAGS += -DNRFX_CLOCK_ENABLED=1
-override CFLAGS += -DNRFX_UARTE_ENABLED=1
-override CFLAGS += -DNRFX_UARTE0_ENABLED=1
+override CFLAGS += -DNRFX_POWER_ENABLED=1
+
 override CFLAGS += -mthumb
 override CFLAGS += -mcpu=cortex-m4
 override CFLAGS += -mfpu=fpv4-sp-d16
