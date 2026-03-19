@@ -1,15 +1,11 @@
-TARGET = main.elf
+TARGET = main
 
 COMPILER_PREFIX = arm-none-eabi-
 CC = $(COMPILER_PREFIX)gcc
 OBJCOPY = $(COMPILER_PREFIX)objcopy
 AR = $(COMPILER_PREFIX)ar
 SIZE = $(COMPILER_PREFIX)size
-GDB = $(COMPILER_PREFIX)gdb
-GDBADDR = localhost
-GDBPORT = 3333
-TTY = $(firstword $(wildcard /dev/ttyACM* /dev/ttyUSB*))
-BAUD = 115200
+UF2 = ~/temp/uf2/utils/uf2conv.py
 
 SRC += $(wildcard *.c *.s *.S)
 SRC += $(wildcard nrfx/drivers/src/*.c)
@@ -71,36 +67,18 @@ override LFLAGS += -Wl,-static
 override LFLAGS += -Wl,-z -Wl,muldefs
 override LFLAGS += -Wl,--start-group $(patsubst %,-l%,$(LIB)) -Wl,--end-group
 
-.PHONY: all build
-all build: $(TARGET)
+.PHONY: all
+all: build size uf2
+
+.PHONY: build
+build: $(TARGET).elf
+
+.PHONY: uf2
+uf2: $(TARGET).uf2
 
 .PHONY: size
-size: $(TARGET)
+size: $(TARGET).elf
 	$(SIZE) $<
-
-.PHONY: debug
-debug: $(TARGET)
-	echo '$$qRcmd,68616c74#fc' | nc -N $(GDBADDR) $(GDBPORT) && echo # halt
-	$(GDB) $< -ex "target remote $(GDBADDR):$(GDBPORT)"
-	echo '$$qRcmd,676f#2c' | nc -N $(GDBADDR) $(GDBPORT) && echo # go
-
-.PHONY: flash
-flash: $(TARGET)
-	echo '$$qRcmd,68616c74#fc' | nc -N $(GDBADDR) $(GDBPORT) && echo # halt
-	$(GDB) $< -ex "target remote $(GDBADDR):$(GDBPORT)" \
-		-ex "load" \
-		-ex "monitor reset" \
-		-batch
-
-.PHONY: reset
-reset:
-	echo '$$qRcmd,7265736574#37' | nc -N $(GDBADDR) $(GDBPORT) && echo # reset
-	echo '$$qRcmd,676f#2c' | nc -N $(GDBADDR) $(GDBPORT) && echo # go
-
-.PHONY: cat
-cat:
-	stty -F $(TTY) sane nl $(BAUD)
-	cat $(TTY)
 
 .PHONY: tags
 tags:
@@ -108,7 +86,7 @@ tags:
 
 -include $(DEP)
 
-$(TARGET): $(OBJ) $(LDSCRIPT)
+%.elf: $(OBJ) $(LDSCRIPT)
 	$(CC) $(OBJ) $(LFLAGS) -o $@
 
 %.o: %.c
@@ -123,7 +101,13 @@ $(TARGET): $(OBJ) $(LDSCRIPT)
 %.o: %.S
 	$(CC) -c -MMD $(ASMFLAGS) $< -o $@
 
+%.bin: %.elf
+	$(OBJCOPY) -O binary $< $@
+
+%.uf2: %.bin
+	$(UF2) $< -c -f 0xADA52840 -b 0x26000 -o $@
+
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET).elf
 	rm -f $(OBJ)
 	rm -f $(DEP)

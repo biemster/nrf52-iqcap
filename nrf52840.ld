@@ -7,8 +7,9 @@ __stack_min              = DEFINED(__stack_min) ? __stack_min : 0x00001000;
 __heap_min               = DEFINED(__heap_min) ? __heap_min : 0x00001000;
 
 MEMORY {
-    FLASH            (RX ) : ORIGIN = 0x00000000, LENGTH = 0x000fa000
-    RAM              (RW ) : ORIGIN = 0x20000000, LENGTH = 0x00034000
+    /* Updated to match the nice!nano UF2 partition map */
+    FLASH (rx) : ORIGIN = 0x26000, LENGTH = 0xc5000
+    RAM (rwx)  : ORIGIN = 0x20000000, LENGTH = 0x40000
 }
 
 SECTIONS {
