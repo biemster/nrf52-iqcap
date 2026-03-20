@@ -10,6 +10,7 @@ UF2 = ~/temp/uf2/utils/uf2conv.py
 SRC += src/startup_nrf52840.s
 SRC += src/$(TARGET).c
 SRC += src/usb_descriptors.c
+SRC += src/rfx.c
 
 SRC += tinyusb/src/tusb.c
 SRC += tinyusb/src/common/tusb_fifo.c

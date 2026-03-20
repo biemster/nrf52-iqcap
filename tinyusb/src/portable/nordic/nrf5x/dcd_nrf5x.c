@@ -39,7 +39,7 @@
 #endif
 
 #include "nrf.h"
-#include "nrfx_clock.h"
+#include "nrf_clock.h"
 #include "nrf_erratas.h"
 
 #ifdef __GNUC__
