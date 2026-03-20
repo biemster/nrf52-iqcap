@@ -1,12 +1,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
-#include <nrfx_clock.h>
-#include <nrfx_power.h>
-#include <tusb.h>
 #include <sys/stat.h>
 
-#define LED (1 << 15) // the blue led on the nice!nano
+#include "nrf.h"
+#include "tusb.h"
+
+#define LED (1 << 15) // the red led on the nice!nano
 
 /* Dummy implementations to satisfy the linker and silence warnings */
 int _write(int handle, char *buffer, int size) { return size; }
@@ -32,7 +32,45 @@ void USBD_IRQHandler(void) {
 }
 
 void POWER_CLOCK_IRQHandler(void) {
-	nrfx_power_irq_handler();
+	uint32_t inten = NRF_POWER->INTENSET;
+
+	// Cable plugged in
+	if ((inten & POWER_INTENSET_USBDETECTED_Msk) && NRF_POWER->EVENTS_USBDETECTED) {
+		NRF_POWER->EVENTS_USBDETECTED = 0;
+		tusb_hal_nrf_power_event(USB_EVT_DETECTED);
+	}
+
+	// Cable unplugged
+	if ((inten & POWER_INTENSET_USBREMOVED_Msk) && NRF_POWER->EVENTS_USBREMOVED) {
+		NRF_POWER->EVENTS_USBREMOVED = 0;
+		tusb_hal_nrf_power_event(USB_EVT_REMOVED);
+	}
+
+	// Power ready to use
+	if ((inten & POWER_INTENSET_USBPWRRDY_Msk) && NRF_POWER->EVENTS_USBPWRRDY) {
+		NRF_POWER->EVENTS_USBPWRRDY = 0;
+		tusb_hal_nrf_power_event(USB_EVT_READY);
+	}
+}
+
+void init_usb_power_irq(void) {
+	// Enable events for USB insertion, removal, and power ready
+	NRF_POWER->INTENSET = (POWER_INTENSET_USBDETECTED_Msk |
+						   POWER_INTENSET_USBREMOVED_Msk  |
+						   POWER_INTENSET_USBPWRRDY_Msk);
+
+	// Enable the POWER_CLOCK IRQ in the NVIC
+	NVIC_EnableIRQ(POWER_CLOCK_IRQn);
+
+	// USB power may already be ready at this time -> no event generated
+	// We need to invoke the handler based on the status initially
+	uint32_t usb_reg = NRF_POWER->USBREGSTATUS;
+	if ( usb_reg & POWER_USBREGSTATUS_VBUSDETECT_Msk ) {
+		tusb_hal_nrf_power_event(USB_EVT_DETECTED);
+	}
+	if ( usb_reg & POWER_USBREGSTATUS_OUTPUTRDY_Msk  ) {
+		tusb_hal_nrf_power_event(USB_EVT_READY);
+	}
 }
 
 void delay_init(void) {
@@ -51,13 +89,6 @@ void delay_ms(uint32_t ms) {
 		__NOP();
 	}
 }
-
-static void power_event_handler(nrfx_power_usb_evt_t event) {
-	tusb_hal_nrf_power_event((uint32_t) event);
-}
-
-// hook for clock init callback.
-void clock_handler(nrfx_clock_evt_type_t event) {}
 
 void jump_bootloader() {
 	// go back to uf2 bootloader
@@ -107,28 +138,8 @@ void main(void) {
 		// Wait for HFCLK to stabilize
 	}
 
-	// Power	
-	const nrfx_power_config_t pwr_cfg = {0};
-	nrfx_power_init(&pwr_cfg);
-	NVIC_EnableIRQ(POWER_CLOCK_IRQn);
-
-	// Register tusb function as USB power handler
-	// cause cast-function-type warning
-	const nrfx_power_usbevt_config_t config = {.handler = power_event_handler};
-	nrfx_power_usbevt_init(&config);
-	nrfx_power_usbevt_enable();
-
-	// USB power may already be ready at this time -> no event generated
-	// We need to invoke the handler based on the status initially
-	uint32_t usb_reg = NRF_POWER->USBREGSTATUS;
-	if ( usb_reg & POWER_USBREGSTATUS_VBUSDETECT_Msk ) {
-		tusb_hal_nrf_power_event(USB_EVT_DETECTED);
-	}
-	if ( usb_reg & POWER_USBREGSTATUS_OUTPUTRDY_Msk  ) {
-		tusb_hal_nrf_power_event(USB_EVT_READY);
-	}
-
-	// Init TinyUSB
+	// Init USB
+	init_usb_power_irq();
 	tusb_init();
 	NVIC_EnableIRQ(USBD_IRQn);
 

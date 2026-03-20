@@ -11,8 +11,6 @@ SRC += startup_nrf52840.s
 SRC += $(TARGET).c
 SRC += usb_descriptors.c
 
-SRC += nrfx/drivers/src/nrfx_power.c
-
 SRC += tinyusb/src/tusb.c
 SRC += tinyusb/src/common/tusb_fifo.c
 SRC += tinyusb/src/device/usbd.c
@@ -21,11 +19,7 @@ SRC += tinyusb/src/class/vendor/vendor_device.c
 SRC += tinyusb/src/portable/nordic/nrf5x/dcd_nrf5x.c
 
 INC += .
-INC += cmsis/CMSIS/Core/Include
-INC += nrfx
-INC += nrfx/drivers/include
-INC += nrfx/mdk # close enough to GCC
-INC += nrfx/templates # use as is
+INC += include
 INC += tinyusb/src
 
 LIB += m
@@ -50,8 +44,6 @@ CFLAGS += -flto
 endif
 
 CFLAGS += -DNRF52840_XXAA
-CFLAGS += -DNRFX_CLOCK_ENABLED=1
-CFLAGS += -DNRFX_POWER_ENABLED=1
 
 CFLAGS += -mthumb
 CFLAGS += -mcpu=cortex-m4
