@@ -7,9 +7,10 @@ AR = $(COMPILER_PREFIX)ar
 SIZE = $(COMPILER_PREFIX)size
 UF2 = ~/temp/uf2/utils/uf2conv.py
 
-SRC += $(wildcard *.c *.s *.S)
+SRC += startup_nrf52840.s
+SRC += $(TARGET).c
+SRC += usb_descriptors.c
 
-SRC += nrfx/drivers/src/nrfx_clock.c
 SRC += nrfx/drivers/src/nrfx_power.c
 
 SRC += tinyusb/src/tusb.c
@@ -32,51 +33,51 @@ LIB += c
 LIB += gcc
 LIB += nosys
 
-LDSCRIPT += $(wildcard *.ld)
+LDSCRIPT += nrf52840.ld
 
 OBJ += $(patsubst %.S,%.o,$(patsubst %.s,%.o,$(patsubst %.c,%.o,$(SRC))))
 DEP += $(patsubst %.o,%.d,$(OBJ))
 
 ifdef DEBUG
-override CFLAGS += -DDEBUG
-override CFLAGS += -g
-override CFLAGS += -O0
+CFLAGS += -DDEBUG
+CFLAGS += -g
+CFLAGS += -O0
 else
 # -DNDEBUG disables asserts which usually isn't what we want
-#override CFLAGS += -DNDEBUG
-override CFLAGS += -Os
-override CFLAGS += -flto
+#CFLAGS += -DNDEBUG
+CFLAGS += -Os
+CFLAGS += -flto
 endif
 
-override CFLAGS += -DNRF52840_XXAA
-override CFLAGS += -DNRFX_CLOCK_ENABLED=1
-override CFLAGS += -DNRFX_POWER_ENABLED=1
+CFLAGS += -DNRF52840_XXAA
+CFLAGS += -DNRFX_CLOCK_ENABLED=1
+CFLAGS += -DNRFX_POWER_ENABLED=1
 
-override CFLAGS += -mthumb
-override CFLAGS += -mcpu=cortex-m4
-override CFLAGS += -mfpu=fpv4-sp-d16
-override CFLAGS += -mfloat-abi=softfp
-override CFLAGS += -std=c99
-override CFLAGS += -Wall -Wno-format
-override CFLAGS += -fno-common
-override CFLAGS += -ffunction-sections
-override CFLAGS += -fdata-sections
-override CFLAGS += -ffreestanding
-override CFLAGS += -fno-builtin
-override CFLAGS += -MMD -MP
-override CFLAGS += $(patsubst %,-I%,$(INC))
+CFLAGS += -mthumb
+CFLAGS += -mcpu=cortex-m4
+CFLAGS += -mfpu=fpv4-sp-d16
+CFLAGS += -mfloat-abi=softfp
+CFLAGS += -std=c99
+CFLAGS += -Wall -Wno-format
+CFLAGS += -fno-common
+CFLAGS += -ffunction-sections
+CFLAGS += -fdata-sections
+CFLAGS += -ffreestanding
+CFLAGS += -fno-builtin
+CFLAGS += -MMD -MP
+CFLAGS += $(patsubst %,-I%,$(INC))
 
-override ASMFLAGS += $(CFLAGS)
+ASMFLAGS += $(CFLAGS)
 
-override LFLAGS += $(CFLAGS)
-override LFLAGS += -T$(LDSCRIPT)
-override LFLAGS += -static
-override LFLAGS += --specs=nano.specs
-override LFLAGS += --specs=nosys.specs
-override LFLAGS += -Wl,--gc-sections
-override LFLAGS += -Wl,-static
-override LFLAGS += -Wl,-z -Wl,muldefs
-override LFLAGS += -Wl,--start-group $(patsubst %,-l%,$(LIB)) -Wl,--end-group
+LDFLAGS += $(CFLAGS)
+LDFLAGS += -T$(LDSCRIPT)
+LDFLAGS += -static
+LDFLAGS += --specs=nano.specs
+LDFLAGS += --specs=nosys.specs
+LDFLAGS += -Wl,--gc-sections
+LDFLAGS += -Wl,-static
+LDFLAGS += -Wl,-z -Wl,muldefs
+LDFLAGS += -Wl,--start-group $(patsubst %,-l%,$(LIB)) -Wl,--end-group
 
 .PHONY: all
 all: build size uf2
@@ -97,8 +98,8 @@ tags:
 
 -include $(DEP)
 
-%.elf: $(OBJ) $(LDSCRIPT)
-	$(CC) $(OBJ) $(LFLAGS) -o $@
+$(TARGET).elf: $(OBJ) $(LDSCRIPT)
+	$(CC) $(OBJ) $(LDFLAGS) -o $@
 
 %.o: %.c
 	$(CC) -c -MMD $(CFLAGS) $< -o $@

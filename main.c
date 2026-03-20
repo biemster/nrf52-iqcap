@@ -31,6 +31,27 @@ void USBD_IRQHandler(void) {
 	tud_int_handler(0);
 }
 
+void POWER_CLOCK_IRQHandler(void) {
+	nrfx_power_irq_handler();
+}
+
+void delay_init(void) {
+	// Enable the Trace and Debug block
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CYCCNT = 0; // Clear the cycle counter
+	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk; // Enable the cycle counter
+}
+
+void delay_ms(uint32_t ms) {
+	uint32_t start = DWT->CYCCNT;
+
+	// nRF52840 runs at 64 MHz. Therefore, 64,000 cycles = 1 millisecond.
+	uint32_t delay_ticks = ms * 64000;
+	while ((DWT->CYCCNT - start) < delay_ticks) {
+		__NOP();
+	}
+}
+
 static void power_event_handler(nrfx_power_usb_evt_t event) {
 	tusb_hal_nrf_power_event((uint32_t) event);
 }
@@ -44,13 +65,6 @@ void jump_bootloader() {
 	NVIC_SystemReset();         // Reboot the chip
 }
 
-void delay_ms(uint32_t ms) {
-	uint32_t count = ms * (64000000 / 1000 / 4);
-	for (volatile uint32_t i = 0; i < count; i++) {
-		__NOP(); // No-operation instruction to prevent compiler from optimizing the loop away
-	}
-}
-
 void blink(int n) {
 	for(int i = n-1; i >= 0; i--) {
 		NRF_P0->OUT |= LED; // ON
@@ -60,24 +74,43 @@ void blink(int n) {
 	}
 }
 
+void tud_vendor_rx_cb(uint8_t intf, const uint8_t *buffer, uint32_t bufsize) {
+	// - CFG_TUD_VENDOR_TXRX_BUFFERED = 1: buffer and bufsize must not be used (both NULL,0) since data is in RX FIFO
+	uint8_t buf[64]; // Buffer to hold the incoming command
+	uint32_t count = tud_vendor_available();
+
+	if (count > 0) {
+		uint32_t bytes_read = tud_vendor_read(buf, sizeof(buf));
+		if (bytes_read == 4 && buf[0] == 0xa2) {
+			blink(3);
+			jump_bootloader();
+		}
+	}
+}
+
 // entry point
 void main(void) {
 	// Relocate the interrupt vector table to the app start address for UF2
 	SCB->VTOR = 0x26000;
 
-	// Clocks
-	nrfx_err_t err = nrfx_clock_init(clock_handler);
-	assert(err == NRFX_SUCCESS);
-	nrfx_clock_start(NRF_CLOCK_DOMAIN_LFCLK); // Start LFCLK (required for USB Power management)
-	nrfx_clock_start(NRF_CLOCK_DOMAIN_HFCLK); // Start HFCLK (required for USB peripheral and RADIO)
+	// Start LFCLK (Low Frequency Clock)
+	NRF_CLOCK->EVENTS_LFCLKSTARTED = 0;
+	NRF_CLOCK->TASKS_LFCLKSTART = 1;
+	while (NRF_CLOCK->EVENTS_LFCLKSTARTED == 0) {
+		// Wait for LFCLK to start
+	}
+
+	// Start HFCLK (High Frequency 32MHz Crystal)
+	NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
+	NRF_CLOCK->TASKS_HFCLKSTART = 1;
+	while (NRF_CLOCK->EVENTS_HFCLKSTARTED == 0) {
+		// Wait for HFCLK to stabilize
+	}
 
 	// Power	
 	const nrfx_power_config_t pwr_cfg = {0};
 	nrfx_power_init(&pwr_cfg);
-
-	// LED
-	NRF_P0->DIRSET = LED;
-	NRF_P0->OUTCLR = LED;
+	NVIC_EnableIRQ(POWER_CLOCK_IRQn);
 
 	// Register tusb function as USB power handler
 	// cause cast-function-type warning
@@ -99,6 +132,13 @@ void main(void) {
 	tusb_init();
 	NVIC_EnableIRQ(USBD_IRQn);
 
+	delay_init();
+
+	// LED
+	NRF_P0->DIRSET = LED;
+	NRF_P0->OUTCLR = LED;
+
+	blink(3);
 	while(1) {
 		tud_task();
 	}
