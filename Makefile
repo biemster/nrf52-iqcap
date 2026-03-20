@@ -7,9 +7,9 @@ AR = $(COMPILER_PREFIX)ar
 SIZE = $(COMPILER_PREFIX)size
 UF2 = ~/temp/uf2/utils/uf2conv.py
 
-SRC += startup_nrf52840.s
-SRC += $(TARGET).c
-SRC += usb_descriptors.c
+SRC += src/startup_nrf52840.s
+SRC += src/$(TARGET).c
+SRC += src/usb_descriptors.c
 
 SRC += tinyusb/src/tusb.c
 SRC += tinyusb/src/common/tusb_fifo.c
@@ -18,7 +18,6 @@ SRC += tinyusb/src/device/usbd_control.c
 SRC += tinyusb/src/class/vendor/vendor_device.c
 SRC += tinyusb/src/portable/nordic/nrf5x/dcd_nrf5x.c
 
-INC += .
 INC += include
 INC += tinyusb/src
 
@@ -27,7 +26,7 @@ LIB += c
 LIB += gcc
 LIB += nosys
 
-LDSCRIPT += nrf52840.ld
+LDSCRIPT += src/nrf52840.ld
 
 OBJ += $(patsubst %.S,%.o,$(patsubst %.s,%.o,$(patsubst %.c,%.o,$(SRC))))
 DEP += $(patsubst %.o,%.d,$(OBJ))
