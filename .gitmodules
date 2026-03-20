@@ -1,3 +1,0 @@
-[submodule "tinyusb"]
-	path = tinyusb
-	url = git@github.com:hathach/tinyusb.git
