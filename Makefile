@@ -1,4 +1,4 @@
-TARGET = main
+TARGET = nrf52_iqcap
 
 COMPILER_PREFIX = arm-none-eabi-
 CC = $(COMPILER_PREFIX)gcc
