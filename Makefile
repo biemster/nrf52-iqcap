@@ -11,16 +11,16 @@ SRC += startup_nrf52840.s
 SRC += $(TARGET).c
 SRC += usb_descriptors.c
 
-SRC += tusb/src/tusb.c
-SRC += tusb/src/common/tusb_fifo.c
-SRC += tusb/src/device/usbd.c
-SRC += tusb/src/device/usbd_control.c
-SRC += tusb/src/class/vendor/vendor_device.c
-SRC += tusb/src/portable/nordic/nrf5x/dcd_nrf5x.c
+SRC += tinyusb/src/tusb.c
+SRC += tinyusb/src/common/tusb_fifo.c
+SRC += tinyusb/src/device/usbd.c
+SRC += tinyusb/src/device/usbd_control.c
+SRC += tinyusb/src/class/vendor/vendor_device.c
+SRC += tinyusb/src/portable/nordic/nrf5x/dcd_nrf5x.c
 
 INC += .
 INC += include
-INC += tusb/src
+INC += tinyusb/src
 
 LIB += m
 LIB += c
