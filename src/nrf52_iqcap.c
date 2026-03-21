@@ -4,9 +4,11 @@
 #include <sys/stat.h>
 
 #include "nrf.h"
+#include "rfx.h"
 #include "tusb.h"
 
-#define LED (1 << 15) // the red led on the nice!nano
+#define LED     (1 << 15) // the red led on the nice!nano
+#define MAXSAMP (56*1024)
 
 /* Dummy implementations to satisfy the linker and silence warnings */
 int _write(int handle, char *buffer, int size) { return size; }
@@ -26,6 +28,11 @@ enum {
 	USB_EVT_REMOVED = 1,
 	USB_EVT_READY = 2
 };
+
+void HardFault_Handler(void) {
+	NRF_P0->OUTSET = LED; // Force LED on to show we crashed
+	while(1) { __NOP(); }
+}
 
 void USBD_IRQHandler(void) {
 	tud_int_handler(0);
@@ -80,15 +87,16 @@ void delay_init(void) {
 	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk; // Enable the cycle counter
 }
 
-void delay_ms(uint32_t ms) {
+void delay_us(uint32_t us) {
 	uint32_t start = DWT->CYCCNT;
 
-	// nRF52840 runs at 64 MHz. Therefore, 64,000 cycles = 1 millisecond.
-	uint32_t delay_ticks = ms * 64000;
+	// nRF52840 runs at 64 MHz. Therefore, 64 cycles = 1 microsecond.
+	uint32_t delay_ticks = us * 64;
 	while ((DWT->CYCCNT - start) < delay_ticks) {
 		__NOP();
 	}
 }
+void delay_ms(uint32_t ms) { delay_us(ms *1000); }
 
 void jump_bootloader() {
 	// go back to uf2 bootloader
@@ -98,9 +106,9 @@ void jump_bootloader() {
 
 void blink(int n) {
 	for(int i = n-1; i >= 0; i--) {
-		NRF_P0->OUT |= LED; // ON
+		NRF_P0->OUTSET = LED;
 		delay_ms(33);
-		NRF_P0->OUT &= ~LED; // OFF
+		NRF_P0->OUTCLR = LED;
 		if(i) delay_ms(33);
 	}
 }
@@ -138,19 +146,38 @@ void main(void) {
 		// Wait for HFCLK to stabilize
 	}
 
-	// Init USB
-	init_usb_power_irq();
-	tusb_init();
-	NVIC_EnableIRQ(USBD_IRQn);
-
 	delay_init();
 
 	// LED
 	NRF_P0->DIRSET = LED;
 	NRF_P0->OUTCLR = LED;
 
-	blink(3);
+	// Radio capture init
+	static uint32_t iq_buf[MAXSAMP];
+	init_radio(/*access address*/0, /*freq*/2400);
+	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
+	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
+
+	radio_set_iq_capture(iq_buf, sizeof(iq_buf));
+	radio_start_rx();
+
+	blink(7); // is also delay, which seems needed
+	radio_trigger_iq_capture();
+	// wait for capture to start
+	while (!nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART)) {
+		delay_us(100);
+	}
+	delay_ms(1);
+	while (!nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND)) {
+		delay_us(100);
+	}
+
+	// Init USB, this should be done after the sample capture in main as that seems to destabilize some stuff
+	init_usb_power_irq();
+	tusb_init();
+	NVIC_EnableIRQ(USBD_IRQn);
+
 	while(1) {
-		tud_task();
+		tud_task(); // tick TinyUSB
 	}
 }
