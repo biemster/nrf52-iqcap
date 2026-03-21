@@ -7,8 +7,15 @@
 #include "rfx.h"
 #include "tusb.h"
 
+#define NRF_CMD_REBOOT    0xa2
+#define NRF_CMD_IQCAPTURE 0xca
+
 #define LED     (1 << 15) // the red led on the nice!nano
-#define MAXSAMP (56*1024)
+#define MAXSAMP 512//(56*1024)
+__attribute__((aligned(4))) static uint32_t iq_buf[MAXSAMP];
+
+static int gs_usb_cmd;
+static int gs_capture_freq;
 
 /* Dummy implementations to satisfy the linker and silence warnings */
 int _write(int handle, char *buffer, int size) { return size; }
@@ -120,10 +127,37 @@ void tud_vendor_rx_cb(uint8_t intf, const uint8_t *buffer, uint32_t bufsize) {
 
 	if (count > 0) {
 		uint32_t bytes_read = tud_vendor_read(buf, sizeof(buf));
-		if (bytes_read == 4 && buf[0] == 0xa2) {
-			blink(3);
-			jump_bootloader();
+		if( bytes_read == 4) {
+			gs_usb_cmd = buf[0];
+			switch(gs_usb_cmd) {
+			case NRF_CMD_REBOOT:
+				break;
+			case NRF_CMD_IQCAPTURE:
+				gs_capture_freq = 2400 +buf[1];
+				break;
+			default:
+				break;
+			}
 		}
+	}
+}
+
+void iqcapture(int freq) {
+	init_radio(/*access address*/0, freq);
+	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
+	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
+
+	radio_set_iq_capture(iq_buf, sizeof(iq_buf));
+	radio_start_rx();
+
+	radio_trigger_iq_capture();
+	// wait for capture to start
+	while (!nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART)) {
+		delay_us(100);
+	}
+	delay_ms(1);
+	while (!nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND)) {
+		delay_us(100);
 	}
 }
 
@@ -152,32 +186,29 @@ void main(void) {
 	NRF_P0->DIRSET = LED;
 	NRF_P0->OUTCLR = LED;
 
-	// Radio capture init
-	static uint32_t iq_buf[MAXSAMP];
-	init_radio(/*access address*/0, /*freq*/2400);
-	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
-	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
-
-	radio_set_iq_capture(iq_buf, sizeof(iq_buf));
-	radio_start_rx();
-
-	blink(7); // is also delay, which seems needed
-	radio_trigger_iq_capture();
-	// wait for capture to start
-	while (!nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART)) {
-		delay_us(100);
-	}
-	delay_ms(1);
-	while (!nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND)) {
-		delay_us(100);
-	}
-
 	// Init USB, this should be done after the sample capture in main as that seems to destabilize some stuff
 	init_usb_power_irq();
 	tusb_init();
 	NVIC_EnableIRQ(USBD_IRQn);
 
+	blink(3);
 	while(1) {
 		tud_task(); // tick TinyUSB
+
+		if(gs_usb_cmd) {
+			switch(gs_usb_cmd) {
+			case NRF_CMD_REBOOT:
+				blink(3);
+				jump_bootloader();
+				break;
+			case NRF_CMD_IQCAPTURE:
+				iqcapture(gs_capture_freq);
+				tud_vendor_write((void*)iq_buf, MAXSAMP);
+				tud_vendor_write_flush();
+				blink(2);
+				break;
+			}
+			gs_usb_cmd = 0;
+		}
 	}
 }
