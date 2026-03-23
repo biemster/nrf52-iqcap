@@ -7,6 +7,7 @@
 #include "rfx.h"
 #include "tusb.h"
 
+#define NRF_CMD_USBTEST   0xa1
 #define NRF_CMD_REBOOT    0xa2
 #define NRF_CMD_IQCAPTURE 0xca
 
@@ -14,8 +15,10 @@
 #define MAXSAMP 512//(56*1024)
 __attribute__((aligned(4))) static uint32_t iq_buf[MAXSAMP];
 
-static int gs_usb_cmd;
-static int gs_capture_freq;
+static volatile int gs_usb_cmd;
+static volatile int gs_capture_freq;
+
+void main_loop(void);
 
 /* Dummy implementations to satisfy the linker and silence warnings */
 int _write(int handle, char *buffer, int size) { return size; }
@@ -87,6 +90,22 @@ void init_usb_power_irq(void) {
 	}
 }
 
+void clock_init() {
+	// Start LFCLK (Low Frequency Clock)
+	NRF_CLOCK->EVENTS_LFCLKSTARTED = 0;
+	NRF_CLOCK->TASKS_LFCLKSTART = 1;
+	while (NRF_CLOCK->EVENTS_LFCLKSTARTED == 0) {
+		// Wait for LFCLK to start
+	}
+
+	// Start HFCLK (High Frequency 32MHz Crystal)
+	NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
+	NRF_CLOCK->TASKS_HFCLKSTART = 1;
+	while (NRF_CLOCK->EVENTS_HFCLKSTARTED == 0) {
+		// Wait for HFCLK to stabilize
+	}
+}
+
 void delay_init(void) {
 	// Enable the Trace and Debug block
 	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
@@ -100,7 +119,7 @@ void delay_us(uint32_t us) {
 	// nRF52840 runs at 64 MHz. Therefore, 64 cycles = 1 microsecond.
 	uint32_t delay_ticks = us * 64;
 	while ((DWT->CYCCNT - start) < delay_ticks) {
-		__NOP();
+		main_loop(); // tick the main loop during delay
 	}
 }
 void delay_ms(uint32_t ms) { delay_us(ms *1000); }
@@ -120,17 +139,28 @@ void blink(int n) {
 	}
 }
 
+void tud_mount_cb(void) {
+	tud_vendor_write_clear();
+
+	uint8_t dump_buf[64];
+	while (tud_vendor_available()) {
+		tud_vendor_read(dump_buf, sizeof(dump_buf));
+	}
+
+	gs_usb_cmd = 0;
+}
+
 void tud_vendor_rx_cb(uint8_t intf, const uint8_t *buffer, uint32_t bufsize) {
 	// - CFG_TUD_VENDOR_TXRX_BUFFERED = 1: buffer and bufsize must not be used (both NULL,0) since data is in RX FIFO
 	uint8_t buf[64]; // Buffer to hold the incoming command
-	uint32_t count = tud_vendor_available();
 
-	if (count > 0) {
+	while (tud_vendor_available() > 0) {
 		uint32_t bytes_read = tud_vendor_read(buf, sizeof(buf));
-		if( bytes_read == 4) {
+		if( (bytes_read == 4) && !gs_usb_cmd) {
 			gs_usb_cmd = buf[0];
 			switch(gs_usb_cmd) {
 			case NRF_CMD_REBOOT:
+			case NRF_CMD_USBTEST:
 				break;
 			case NRF_CMD_IQCAPTURE:
 				gs_capture_freq = 2400 +buf[1];
@@ -153,11 +183,36 @@ void iqcapture(int freq) {
 	radio_trigger_iq_capture();
 	// wait for capture to start
 	while (!nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART)) {
-		delay_us(100);
+		delay_us(10);
 	}
 	delay_ms(1);
 	while (!nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND)) {
-		delay_us(100);
+		delay_us(10);
+	}
+}
+
+void main_loop(void) {
+	tud_task();
+}
+
+void usb_cmd_handler() {
+	if(gs_usb_cmd) {
+		switch(gs_usb_cmd) {
+		case NRF_CMD_REBOOT:
+			blink(3);
+			jump_bootloader();
+			break;
+		case NRF_CMD_USBTEST:
+			blink(2);
+			break;
+		case NRF_CMD_IQCAPTURE:
+			iqcapture(gs_capture_freq);
+			tud_vendor_write((void*)iq_buf, MAXSAMP);
+			tud_vendor_write_flush();
+			blink(2);
+			break;
+		}
+		gs_usb_cmd = 0;
 	}
 }
 
@@ -166,49 +221,21 @@ void main(void) {
 	// Relocate the interrupt vector table to the app start address for UF2
 	SCB->VTOR = 0x26000;
 
-	// Start LFCLK (Low Frequency Clock)
-	NRF_CLOCK->EVENTS_LFCLKSTARTED = 0;
-	NRF_CLOCK->TASKS_LFCLKSTART = 1;
-	while (NRF_CLOCK->EVENTS_LFCLKSTARTED == 0) {
-		// Wait for LFCLK to start
-	}
-
-	// Start HFCLK (High Frequency 32MHz Crystal)
-	NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
-	NRF_CLOCK->TASKS_HFCLKSTART = 1;
-	while (NRF_CLOCK->EVENTS_HFCLKSTARTED == 0) {
-		// Wait for HFCLK to stabilize
-	}
-
+	clock_init();
 	delay_init();
 
 	// LED
 	NRF_P0->DIRSET = LED;
 	NRF_P0->OUTCLR = LED;
 
-	// Init USB, this should be done after the sample capture in main as that seems to destabilize some stuff
+	// Init USB
 	init_usb_power_irq();
 	tusb_init();
 	NVIC_EnableIRQ(USBD_IRQn);
 
 	blink(3);
 	while(1) {
-		tud_task(); // tick TinyUSB
-
-		if(gs_usb_cmd) {
-			switch(gs_usb_cmd) {
-			case NRF_CMD_REBOOT:
-				blink(3);
-				jump_bootloader();
-				break;
-			case NRF_CMD_IQCAPTURE:
-				iqcapture(gs_capture_freq);
-				tud_vendor_write((void*)iq_buf, MAXSAMP);
-				tud_vendor_write_flush();
-				blink(2);
-				break;
-			}
-			gs_usb_cmd = 0;
-		}
+		main_loop();
+		usb_cmd_handler();
 	}
 }

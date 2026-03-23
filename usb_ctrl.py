@@ -9,8 +9,10 @@ NRF_USB_EP_OUT       = 0x01      # endpoint for command transfer out
 NRF_USB_PACKET_SIZE  = 256       # packet size
 NRF_USB_TIMEOUT_MS   = 100       # timeout for normal USB operations
 
+NRF_CMD_USBTEST      = 0xa1
 NRF_CMD_REBOOT       = 0xa2
 NRF_CMD_IQCAPTURE    = 0xca
+NRF_STR_USBTEST      = (NRF_CMD_USBTEST, 0x01, 0x00, 0x01)
 NRF_STR_REBOOT       = (NRF_CMD_REBOOT, 0x01, 0x00, 0x01)
 NRF_STR_IQCAPTURE    = (NRF_CMD_IQCAPTURE, 0x00, 0x00, 0x01)
 
@@ -22,6 +24,7 @@ def main():
     parser.add_argument('-b', '--bootloader', help='Reboot to bootloader', action='store_true')
     parser.add_argument('-c', '--channel', help='start IQ capture on BLE channel')
     parser.add_argument('-f', '--frequency', help='start IQ capture on frequency (MHz)')
+    parser.add_argument('-u', '--usbtest', help='Send test command over USB to blink the LED', action='store_true')
     args = parser.parse_args()
 
     if device is None:
@@ -30,7 +33,10 @@ def main():
 
     # Clear any pending data in the pipes
     try:
-        device.read(CH_USB_EP_IN, NRF_USB_PACKET_SIZE, 10)
+        device.set_configuration() # gets tud_mount_cb called on the mcu
+        device.clear_halt(NRF_USB_EP_IN)  # reset DATA0/1 toggle
+        device.clear_halt(NRF_USB_EP_OUT) # reset DATA0/1 toggle
+        device.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, 10)
     except:
         pass
 
@@ -41,6 +47,12 @@ def main():
             sleep(.3)
         except Exception as e:
             print(f"Command sent (device may have reset already): {e}")
+    elif args.usbtest:
+        print('USB test, blinking the LED')
+        try:
+            device.write(NRF_USB_EP_OUT, NRF_STR_USBTEST)
+        except Exception as e:
+            print(f"Exception: {e}")
     elif args.channel or args.frequency:
         if args.channel:
             ble_frequencies = [
