@@ -12,7 +12,7 @@
 #define NRF_CMD_IQCAPTURE 0xca
 
 #define LED     (1 << 15) // the red led on the nice!nano
-#define MAXSAMP 512//(56*1024)
+#define MAXSAMP (14*1024)
 __attribute__((aligned(4))) static uint32_t iq_buf[MAXSAMP];
 
 static volatile int gs_usb_cmd;
@@ -119,7 +119,7 @@ void delay_us(uint32_t us) {
 	// nRF52840 runs at 64 MHz. Therefore, 64 cycles = 1 microsecond.
 	uint32_t delay_ticks = us * 64;
 	while ((DWT->CYCCNT - start) < delay_ticks) {
-		main_loop(); // tick the main loop during delay
+		__NOP();
 	}
 }
 void delay_ms(uint32_t ms) { delay_us(ms *1000); }
@@ -177,7 +177,7 @@ void iqcapture(int freq) {
 	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
 	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
 
-	radio_set_iq_capture(iq_buf, sizeof(iq_buf));
+	radio_set_iq_capture(iq_buf, MAXSAMP);
 	radio_start_rx();
 
 	radio_trigger_iq_capture();
@@ -191,10 +191,6 @@ void iqcapture(int freq) {
 	}
 }
 
-void main_loop(void) {
-	tud_task();
-}
-
 void usb_cmd_handler() {
 	if(gs_usb_cmd) {
 		switch(gs_usb_cmd) {
@@ -206,9 +202,19 @@ void usb_cmd_handler() {
 			blink(2);
 			break;
 		case NRF_CMD_IQCAPTURE:
+			uint32_t total_bytes = MAXSAMP * sizeof(iq_buf[0]);
+			uint32_t bytes_sent = 0;
+			uint8_t* ptr = (uint8_t*)iq_buf;
 			iqcapture(gs_capture_freq);
-			tud_vendor_write((void*)iq_buf, MAXSAMP);
-			tud_vendor_write_flush();
+			while ((bytes_sent < total_bytes) && tud_vendor_mounted()) {
+				uint32_t pushed = tud_vendor_write(ptr, (total_bytes - bytes_sent));
+				if (pushed > 0) {
+					ptr += pushed;
+					bytes_sent += pushed;
+					tud_vendor_write_flush(); // Tell TinyUSB the data is ready to go
+				}
+				tud_task();
+			}
 			blink(2);
 			break;
 		}
@@ -235,7 +241,7 @@ void main(void) {
 
 	blink(3);
 	while(1) {
-		main_loop();
+		tud_task();
 		usb_cmd_handler();
 	}
 }

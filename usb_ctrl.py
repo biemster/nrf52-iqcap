@@ -6,7 +6,7 @@ from time import sleep
 
 NRF_USB_EP_IN        = 0x81      # endpoint for data transfer in
 NRF_USB_EP_OUT       = 0x01      # endpoint for command transfer out
-NRF_USB_PACKET_SIZE  = 256       # packet size
+NRF_USB_PACKET_SIZE  = 14*1024*4 # packet size
 NRF_USB_TIMEOUT_MS   = 100       # timeout for normal USB operations
 
 NRF_CMD_USBTEST      = 0xa1
@@ -83,7 +83,7 @@ def main():
         with open('capture.raw', 'wb') as f:
             while True:
                 try:
-                    data = device.read(NRF_USB_EP_IN, 1024, timeout=NRF_USB_TIMEOUT_MS)
+                    data = device.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, timeout=NRF_USB_TIMEOUT_MS)
                     f.write(data)
                 except usb.core.USBError as e:
                     # Handle timeout/disconnects
