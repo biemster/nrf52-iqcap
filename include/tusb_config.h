@@ -44,8 +44,6 @@
 #define CFG_TUD_VENDOR_EPSIZE      64
 
 // Buffer sizes for TinyUSB internal FIFOs.
-// Because you are pushing large IQ arrays, a larger TX buffer helps 
-// queue data efficiently without dropping samples.
 #define CFG_TUD_VENDOR_RX_BUFSIZE  64
 #define CFG_TUD_VENDOR_TX_BUFSIZE  64
 

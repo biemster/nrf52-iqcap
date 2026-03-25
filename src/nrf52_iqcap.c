@@ -12,7 +12,7 @@
 #define NRF_CMD_IQCAPTURE 0xca
 
 #define LED     (1 << 15) // the red led on the nice!nano
-#define MAXSAMP (14*1024)
+#define MAXSAMP (62*1024)
 __attribute__((aligned(4))) static uint32_t iq_buf[MAXSAMP];
 
 static volatile int gs_usb_cmd;
@@ -191,6 +191,48 @@ void iqcapture(int freq) {
 	}
 }
 
+void bulk_send() {
+	uint32_t total_bytes = MAXSAMP * sizeof(iq_buf[0]);
+	uint32_t bytes_sent = 0;
+	uint8_t* ptr = (uint8_t*)iq_buf;
+
+	// Convert in place to sign extend 12-bit samples
+	for(int i = 0; i < MAXSAMP; i++) {
+		uint32_t val = iq_buf[i];
+
+		int16_t i_sample = (int16_t)( ((int32_t)(val << 20)) >> 20 );
+		int16_t q_sample = (int16_t)( ((int32_t)(val << 8))  >> 20 );
+
+		iq_buf[i] = ((uint8_t *)&i_sample)[0] << 24 |
+					((uint8_t *)&i_sample)[1] << 16 |
+					((uint8_t *)&q_sample)[0] << 8  |
+					((uint8_t *)&q_sample)[1];
+
+		// Yield to TinyUSB every 512 iterations so the USB connection doesn't drop
+		if ((i % 512) == 0) {
+			tud_task();
+		}
+	}
+
+	while ((bytes_sent < total_bytes) && tud_vendor_mounted()) {
+		// Calculate remaining bytes, but cap the request to 1024 bytes
+		uint32_t chunk = total_bytes - bytes_sent;
+		if (chunk > 1024) {
+			chunk = 1024;
+		}
+
+		uint32_t pushed = tud_vendor_write(ptr, chunk);
+		if (pushed > 0) {
+			ptr += pushed;
+			bytes_sent += pushed;
+			tud_vendor_write_flush(); // Tell TinyUSB the data is ready to go
+		}
+
+		// Keep the USB state machine moving
+		tud_task();
+	}
+}
+
 void usb_cmd_handler() {
 	if(gs_usb_cmd) {
 		switch(gs_usb_cmd) {
@@ -202,19 +244,8 @@ void usb_cmd_handler() {
 			blink(2);
 			break;
 		case NRF_CMD_IQCAPTURE:
-			uint32_t total_bytes = MAXSAMP * sizeof(iq_buf[0]);
-			uint32_t bytes_sent = 0;
-			uint8_t* ptr = (uint8_t*)iq_buf;
 			iqcapture(gs_capture_freq);
-			while ((bytes_sent < total_bytes) && tud_vendor_mounted()) {
-				uint32_t pushed = tud_vendor_write(ptr, (total_bytes - bytes_sent));
-				if (pushed > 0) {
-					ptr += pushed;
-					bytes_sent += pushed;
-					tud_vendor_write_flush(); // Tell TinyUSB the data is ready to go
-				}
-				tud_task();
-			}
+			bulk_send();
 			blink(2);
 			break;
 		}
