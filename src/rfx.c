@@ -154,3 +154,7 @@ int radio_start_rx(void) {
 
 	return 0;
 }
+
+void radio_wait_for_state(nrf_radio_state_t desired_state) {
+	while (nrf_radio_state_get(NRF_RADIO) != desired_state);
+}

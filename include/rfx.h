@@ -91,6 +91,12 @@ int radio_set_iq_capture(uint32_t *data, size_t nsamp);
  */
 int radio_start_rx(void);
 
+/**
+ * @brief Wait for the radio to enter a specific state
+ * @param desired_state The radio state to wait for
+ */
+void radio_wait_for_state(nrf_radio_state_t desired_state);
+
 #ifdef __cplusplus
 }
 #endif

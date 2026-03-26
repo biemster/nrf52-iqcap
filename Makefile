@@ -5,7 +5,7 @@ CC = $(COMPILER_PREFIX)gcc
 OBJCOPY = $(COMPILER_PREFIX)objcopy
 AR = $(COMPILER_PREFIX)ar
 SIZE = $(COMPILER_PREFIX)size
-UF2 = ~/temp/uf2/utils/uf2conv.py
+UF2 = uf2conv
 
 SRC += src/startup_nrf52840.s
 SRC += src/$(TARGET).c
@@ -71,8 +71,13 @@ LDFLAGS += -Wl,-static
 LDFLAGS += -Wl,-z -Wl,muldefs
 LDFLAGS += -Wl,--start-group $(patsubst %,-l%,$(LIB)) -Wl,--end-group
 
-.PHONY: all
+.PHONY: all flash
 all: build size uf2
+
+flash: all
+	python usb_ctrl.py -b
+	sleep 3
+	udisksctl mount -b /dev/sd? && cp nrf52_iqcap.uf2 /run/media/*/NICENANO
 
 .PHONY: build
 build: $(TARGET).elf

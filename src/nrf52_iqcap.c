@@ -12,8 +12,8 @@
 #define NRF_CMD_IQCAPTURE 0xca
 
 #define LED     (1 << 15) // the red led on the nice!nano
-#define MAXSAMP (62*1024)
-__attribute__((aligned(4))) static uint32_t iq_buf[MAXSAMP];
+#define MAXSAMP (16*1024)
+__attribute__((aligned(8192))) static uint32_t iq_buf[MAXSAMP];
 
 static volatile int gs_usb_cmd;
 static volatile int gs_capture_freq;
@@ -180,6 +180,9 @@ void iqcapture(int freq) {
 	radio_set_iq_capture(iq_buf, MAXSAMP);
 	radio_start_rx();
 
+	radio_wait_for_state(NRF_RADIO_STATE_RX);
+	delay_us(10);
+
 	radio_trigger_iq_capture();
 	// wait for capture to start
 	while (!nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART)) {
@@ -203,13 +206,10 @@ void bulk_send() {
 		int16_t i_sample = (int16_t)( ((int32_t)(val << 20)) >> 20 );
 		int16_t q_sample = (int16_t)( ((int32_t)(val << 8))  >> 20 );
 
-		iq_buf[i] = ((uint8_t *)&i_sample)[0] << 24 |
-					((uint8_t *)&i_sample)[1] << 16 |
-					((uint8_t *)&q_sample)[0] << 8  |
-					((uint8_t *)&q_sample)[1];
+		iq_buf[i] = (i_sample << 16) | (q_sample & 0xFFFF);
 
 		// Yield to TinyUSB every 512 iterations so the USB connection doesn't drop
-		if ((i % 512) == 0) {
+		if ((i % 256) == 0) {
 			tud_task();
 		}
 	}
