@@ -24,11 +24,11 @@ The format is interleaved shorts of 12-bit I and Q samples sign extended to 16 b
 The sample rate is fixed at 16 Msps.
 
 ```sh
-$ python usb_ctrl.py -c 37 -d 100
+$ python usb_ctrl.py -c 37 -t -d 100
 $ python const_plot.py
 ```
 
-This will capture on BLE channel 37 (2402 MHz) starting 100 us after a falling edge trigger. 
+This will capture on 2402 MHz BLE channel 37 (`-c 37`) starting 100 us (`-d 100`) after a falling edge trigger (`-t`). 
 The `const_plot.py` script will show a constellation plot of the captured data.
 
 ## Credits
