@@ -11,6 +11,9 @@
 #define NRF_CMD_REBOOT          0xa2
 #define NRF_CMD_IQCAPTURE_TRIG  0xca
 #define NRF_CMD_IQCAPTURE_NOW   0xcb
+#define NRF_CMD_RADIO_STOP      0xcf
+#define NRF_CMD_PEEK32          0xd1
+#define NRF_CMD_POKE32          0xd2
 
 #define TRIG_TIMER              NRF_TIMER2
 #define TRIG_TIMER_IRQn         TIMER2_IRQn
@@ -22,8 +25,7 @@
 __attribute__((aligned(8192))) static uint32_t iq_buf[MAXSAMP];
 
 static volatile int gs_usb_cmd;
-static volatile int gs_capture_freq;
-static volatile int gs_capture_delay;
+static volatile uint8_t gs_usb_buf[64];
 
 void main_loop(void);
 
@@ -221,22 +223,10 @@ void tud_vendor_rx_cb(uint8_t intf, const uint8_t *buffer, uint32_t bufsize) {
 
     while (tud_vendor_available() > 0) {
         uint32_t bytes_read = tud_vendor_read(buf, sizeof(buf));
-        if( (bytes_read == 4) && !gs_usb_cmd) {
+        if(!gs_usb_cmd && bytes_read > 0) {
             gs_usb_cmd = buf[0];
-            switch(gs_usb_cmd) {
-            case NRF_CMD_REBOOT:
-            case NRF_CMD_USBTEST:
-                break;
-            case NRF_CMD_IQCAPTURE_TRIG:
-                gs_capture_freq = 2400 +buf[1];
-                gs_capture_delay = (buf[2] << 8) | buf[3];
-                break;
-            case NRF_CMD_IQCAPTURE_NOW:
-                gs_capture_freq = 2400 +buf[1];
-                gs_capture_delay = 1;
-                break;
-            default:
-                break;
+            if (bytes_read > 1) {
+                memcpy((void*)gs_usb_buf, buf, bytes_read);
             }
         }
     }
@@ -274,25 +264,10 @@ void iq_capture(int freq) {
     radio_trigger_iq_capture();
 }
 
-void bulk_send(uint32_t *buf, int nsamp) {
-    uint32_t total_bytes = nsamp * sizeof(uint32_t);
+void bulk_send(uint8_t *buf, int num_bytes) {
+    uint32_t total_bytes = num_bytes;
     uint32_t bytes_sent = 0;
     uint8_t* ptr = (uint8_t*)buf;
-
-    // Convert in place to sign extend 12-bit samples
-    for(int i = 0; i < nsamp; i++) {
-        uint32_t val = buf[i];
-
-        int16_t i_sample = (int16_t)( ((int32_t)(val << 20)) >> 20 );
-        int16_t q_sample = (int16_t)( ((int32_t)(val << 8))  >> 20 );
-
-        buf[i] = (i_sample << 16) | (q_sample & 0xFFFF);
-
-        // Yield to TinyUSB every 512 iterations so the USB connection doesn't drop
-        if ((i % 256) == 0) {
-            tud_task();
-        }
-    }
 
     while ((bytes_sent < total_bytes) && tud_vendor_mounted()) {
         // Calculate remaining bytes, but cap the request to 1024 bytes
@@ -313,7 +288,28 @@ void bulk_send(uint32_t *buf, int nsamp) {
     }
 }
 
+void send_iq_samples(uint32_t *buf, int nsamp) {
+    // Convert in place to sign extend 12-bit samples
+    for(int i = 0; i < nsamp; i++) {
+        uint32_t val = buf[i];
+
+        int16_t i_sample = (int16_t)( ((int32_t)(val << 20)) >> 20 );
+        int16_t q_sample = (int16_t)( ((int32_t)(val << 8))  >> 20 );
+
+        // Pack as little endian shorts, I first, then Q
+        buf[i] = (q_sample << 16) | (i_sample & 0xFFFF);
+
+        // Yield to TinyUSB every 512 iterations so the USB connection doesn't drop
+        if ((i % 256) == 0) {
+            tud_task();
+        }
+    }
+
+    bulk_send((uint8_t*)buf, nsamp * sizeof(uint32_t));
+}
+
 void usb_cmd_handler() {
+    int freq, delay_ticks;
     if(gs_usb_cmd) {
         switch(gs_usb_cmd) {
         case NRF_CMD_REBOOT:
@@ -324,11 +320,48 @@ void usb_cmd_handler() {
             blink(2);
             break;
         case NRF_CMD_IQCAPTURE_TRIG:
-            arm_capture(gs_capture_freq, gs_capture_delay);
+            freq = 2400 + gs_usb_buf[1];
+            delay_ticks = ((uint32_t)gs_usb_buf[2] << 8) | gs_usb_buf[3];
+            arm_capture(freq, delay_ticks);
             break;
         case NRF_CMD_IQCAPTURE_NOW:
-            iq_capture(gs_capture_freq);
+            freq = 2400 + gs_usb_buf[1];
+            iq_capture(freq);
+            blink(1);
             break;
+        case NRF_CMD_RADIO_STOP:
+            radio_stop();
+            blink(1);
+            break;
+        case NRF_CMD_PEEK32:
+            volatile uint32_t* peek_addr =  (uint32_t*)(
+                                            (gs_usb_buf[4] << 24) |
+                                            (gs_usb_buf[5] << 16) |
+                                            (gs_usb_buf[6] <<  8) |
+                                            (gs_usb_buf[7] <<  0));
+            uint32_t peek_val = *peek_addr;
+            uint8_t peek_res[4] = {
+                (peek_val >> 24) & 0xFF,
+                (peek_val >> 16) & 0xFF,
+                (peek_val >> 8) & 0xFF,
+                peek_val & 0xFF
+            };
+            blink(1);
+            bulk_send(peek_res, sizeof(peek_res));
+            break;
+        case NRF_CMD_POKE32:
+            volatile uint32_t* poke_addr =  (uint32_t*)(
+                                            (gs_usb_buf[4] << 24) |
+                                            (gs_usb_buf[5] << 16) |
+                                            (gs_usb_buf[6] <<  8) |
+                                            (gs_usb_buf[7] <<  0));
+            uint32_t poke_val = (gs_usb_buf[8] << 24) |
+                                (gs_usb_buf[9] << 16) |
+                                (gs_usb_buf[10] << 8) |
+                                (gs_usb_buf[11] << 0);
+            *poke_addr = poke_val;
+            blink(1);
+            break;            
         }
         gs_usb_cmd = 0;
     }
@@ -337,7 +370,7 @@ void usb_cmd_handler() {
 void capture_handler() {
     if (nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND)) {
         nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
-        bulk_send(iq_buf, MAXSAMP);
+        send_iq_samples(iq_buf, MAXSAMP);
         blink(2);
     }
 }

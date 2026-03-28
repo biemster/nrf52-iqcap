@@ -23,10 +23,17 @@ NRF_CMD_USBTEST     = 0xa1
 NRF_CMD_REBOOT      = 0xa2
 NRF_CMD_IQCAP_TRIG  = 0xca
 NRF_CMD_IQCAP_NOW   = 0xcb
+NRF_CMD_RADIO_STOP  = 0xcf
+NRF_CMD_PEEK32      = 0xd1
+NRF_CMD_POKE32      = 0xd2
 NRF_STR_USBTEST     = (NRF_CMD_USBTEST, 0x01, 0x00, 0x01)
 NRF_STR_REBOOT      = (NRF_CMD_REBOOT, 0x01, 0x00, 0x01)
 NRF_STR_IQCAP_TRIG  = (NRF_CMD_IQCAP_TRIG, 0x00, 0x00, 0x01)
 NRF_STR_IQCAP_NOW   = (NRF_CMD_IQCAP_NOW, 0x00, 0x00, 0x01)
+NRF_STR_RADIO_STOP  = (NRF_CMD_RADIO_STOP, 0x00, 0x00, 0x00)
+NRF_STR_PEEK32      = (NRF_CMD_PEEK32, 0x00, 0x00, 0x00, 0, 0, 0, 0)
+NRF_STR_POKE32      = (NRF_CMD_POKE32, 0x00, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0)
+
 
 BLE_FREQUENCIES = [
     2404, 2406, 2408, 2410, 2412, 2414, 2416, 2418, 2420, 2422, 2424, # 0-10
@@ -167,6 +174,8 @@ def main():
     parser.add_argument('-d', '--delay', help='delay after trigger before starting capture (us)')
     parser.add_argument('-t', '--trigger', help='Wait for GPIO trigger', action='store_true')
     parser.add_argument('-u', '--usbtest', help='Send test command over USB to blink the LED', action='store_true')
+    parser.add_argument('--peek', help='Peek 32-bit value from address', type=lambda x: int(x, base=0))
+    parser.add_argument('--poke', help='Poke 32-bit value to address (addr value)', nargs=2, type=lambda x: int(x, base=0))
     args = parser.parse_args()
 
     if device is None:
@@ -190,6 +199,31 @@ def main():
         print('USB test, blinking the LED')
         try:
             device.write(NRF_USB_EP_OUT, NRF_STR_USBTEST)
+        except Exception as e:
+            print(f"Exception: {e}")
+    elif args.peek is not None:
+        print(f'Peeking address 0x{args.peek:08x}')
+        cmd = bytearray(NRF_STR_PEEK32)
+        cmd[4:8] = args.peek.to_bytes(4, 'big')
+        try:
+            device.write(NRF_USB_EP_OUT, cmd)
+            data = device.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, timeout=NRF_USB_TIMEOUT_MS)
+            if len(data) >= 4:
+                peek_val = int.from_bytes(data[0:4], 'big')
+                print(f'Value at 0x{args.peek:08x} = 0x{peek_val:08x}')
+            else:
+                print("Unexpected response length")
+        except Exception as e:
+            print(f"Exception: {e}")
+    elif args.poke is not None:
+        addr, value = args.poke
+        print(f'Poking value 0x{value:08x} to address 0x{addr:08x}')
+        cmd = bytearray(NRF_STR_POKE32)
+        cmd[4:8] = addr.to_bytes(4, 'big')
+        cmd[8:12] = value.to_bytes(4, 'big')
+        try:
+            device.write(NRF_USB_EP_OUT, cmd)
+            print("Poke command sent")
         except Exception as e:
             print(f"Exception: {e}")
     elif args.channel or args.frequency:

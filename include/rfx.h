@@ -92,6 +92,13 @@ int radio_set_iq_capture(uint32_t *data, size_t nsamp);
 int radio_start_rx(void);
 
 /**
+ * @brief Stop the radio
+ * 
+ * @return 0 on success, negative error code on failure
+ */
+int radio_stop(void);
+
+/**
  * @brief Wait for the radio to enter a specific state
  * @param desired_state The radio state to wait for
  */

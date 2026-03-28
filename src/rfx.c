@@ -113,9 +113,7 @@ int radio_trigger_iq_capture(void) {
     return 0;
 }
 
-int radio_start_rx(void) {
-    // We want to be in DISABLED
-    // RXIDLE is configured to shortcut to RX
+int radio_stop(void) {
     bool is_disabled = false;
     while (!is_disabled) {
         nrf_radio_state_t state = nrf_radio_state_get(NRF_RADIO);
@@ -142,6 +140,13 @@ int radio_start_rx(void) {
                 return -EIO;
         }
     }
+
+    return 0;
+}
+
+int radio_start_rx(void) {
+    // We want to be in DISABLED
+    radio_stop();
 
     NRF_RADIO->PCNF1 = (NRF_RADIO->PCNF1 & ~RADIO_PCNF1_MAXLEN_Msk);
 
