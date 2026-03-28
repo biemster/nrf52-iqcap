@@ -1,7 +1,7 @@
 /**
  * @file rfx.h
  * @brief Extended RF-related functionality
- *
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef RFX_H__

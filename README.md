@@ -1,26 +1,45 @@
-## Baremetal NRF52840 example
+# nRF52840 IQ Capture Tool
 
-This is a minimal example of a baremetal NRF52840 project with raw IQ capture sent over USB Bulk
+A tool using undocumented test features of the nRF52 RADIO core as a cheap one-shot 2.4GHz SDR
 
-It has vendored code from three libraries
-- [CMSIS][CMSIS] - Provided by ARM
-- [nrfx][nrfx] - Provided by Nordic
-- [TinyUSB][tinyusb] - Provided by hathach (tinyusb.org)
+### Build
 
-## Usage
+Build the uf2 file using the default `make` target.
+This repo targets the nice!nano v2 nRF52840 board and generic clones,
+available for a few dollars from the typical sources.
 
-This includes a Makefile that compiles using `arm-none-eabi-gcc`:
+This project is compatible with the nicenano 6.x.x sd140 bootloader. 
+This usually ships preflashed on the clones, but can be installed manually by following the 
+[instructions here](https://github.com/Nice-Keyboards/nice-keyboards-docs/blob/master/docs/nice!nano/troubleshooting.md). Newer bootloader versions may use a different memory layout which will not work.
 
-``` bash
-$ make
+
+### Run
+
+The IQ capture is triggered by a GPIO event plus a configurable delay (up to 4 ms).
+After being armed by the host python script, the LED comes on.
+A falling edge on the trigger pin (default P0.17) starts a delay timer.
+After the configured delay, the status LED goes off and capture begins.
+Capture data is saved to `capture.raw`.
+The format is interleaved shorts of 12-bit I and Q samples sign extended to 16 bits.
+The sample rate is fixed at 16 Msps.
+
+```sh
+$ python usb_ctrl.py -c 37 -d 100
+$ python const_plot.py
 ```
 
-## Notes
+This will capture on BLE channel 37 (2402 MHz) starting 100 us after a falling edge trigger. 
+The `const_plot.py` script will show a constellation plot of the captured data.
 
-- This is a very minimal example.
-- nrfx provides drivers for Nordic's peripherals, while CMSIS provides useful
-  intrinsics for ARM cores.
+## Credits
 
-[CMSIS]: https://github.com/ARM-software/CMSIS_5
-[nrfx]: https://github.com/NordicSemiconductor/nrfx
-[tinyusb]: https://github.com/hathach/tinyusb
+- *[@iracigt](https://github.com/iracigt)* nRF52840 reverse engineering 
+- *[@biemster](https://github.com/biemster)* Bare-metal rewrite and USB support
+- Using the [nrf52480-baremetal](https://github.com/geky/nrf52480-baremetal) setup from [@geky](https://github.com/geky/)
+
+## License
+
+The capture code and host side scripts are available under the [MIT License](./LICENSE).
+The TinyUSB project is also [MIT licensed](./tinyusb/LICENSE).
+Vendor libraries in [include](./include/) are provided under their corresponding licenses.
+See file headers for details.
