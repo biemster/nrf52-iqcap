@@ -7,9 +7,10 @@
 #include "rfx.h"
 #include "tusb.h"
 
-#define NRF_CMD_USBTEST   0xa1
-#define NRF_CMD_REBOOT    0xa2
-#define NRF_CMD_IQCAPTURE 0xca
+#define NRF_CMD_USBTEST   		0xa1
+#define NRF_CMD_REBOOT    		0xa2
+#define NRF_CMD_IQCAPTURE_TRIG 	0xca
+#define NRF_CMD_IQCAPTURE_NOW 	0xcb
 
 #define TRIG_TIMER			NRF_TIMER2
 #define TRIG_TIMER_IRQn		TIMER2_IRQn
@@ -226,9 +227,13 @@ void tud_vendor_rx_cb(uint8_t intf, const uint8_t *buffer, uint32_t bufsize) {
 			case NRF_CMD_REBOOT:
 			case NRF_CMD_USBTEST:
 				break;
-			case NRF_CMD_IQCAPTURE:
+			case NRF_CMD_IQCAPTURE_TRIG:
 				gs_capture_freq = 2400 +buf[1];
 				gs_capture_delay = (buf[2] << 8) | buf[3];
+				break;
+			case NRF_CMD_IQCAPTURE_NOW:
+				gs_capture_freq = 2400 +buf[1];
+				gs_capture_delay = 1;
 				break;
 			default:
 				break;
@@ -253,8 +258,9 @@ void arm_capture(int freq, int delay_ticks) {
 	set_trigger(delay_ticks);
 }
 
-void iqcapture(int freq) {
+void iq_capture(int freq) {
 	init_radio(/*access address*/0, freq);
+
 	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
 	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
 
@@ -264,15 +270,8 @@ void iqcapture(int freq) {
 	radio_wait_for_state(NRF_RADIO_STATE_RX);
 	delay_us(10);
 
+	// Trigger IQ capture immediately
 	radio_trigger_iq_capture();
-	// wait for capture to start
-	while (!nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART)) {
-		delay_us(10);
-	}
-	delay_ms(1);
-	while (!nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND)) {
-		delay_us(10);
-	}
 }
 
 void bulk_send(uint32_t *buf, int nsamp) {
@@ -324,8 +323,11 @@ void usb_cmd_handler() {
 		case NRF_CMD_USBTEST:
 			blink(2);
 			break;
-		case NRF_CMD_IQCAPTURE:
+		case NRF_CMD_IQCAPTURE_TRIG:
 			arm_capture(gs_capture_freq, gs_capture_delay);
+			break;
+		case NRF_CMD_IQCAPTURE_NOW:
+			iq_capture(gs_capture_freq);
 			break;
 		}
 		gs_usb_cmd = 0;

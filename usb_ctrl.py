@@ -19,12 +19,14 @@ NRF_USB_EP_OUT       = 0x01      # endpoint for command transfer out
 NRF_USB_PACKET_SIZE  = 14*1024*4 # packet size
 NRF_USB_TIMEOUT_MS   = 100       # timeout for normal USB operations
 
-NRF_CMD_USBTEST      = 0xa1
-NRF_CMD_REBOOT       = 0xa2
-NRF_CMD_IQCAPTURE    = 0xca
-NRF_STR_USBTEST      = (NRF_CMD_USBTEST, 0x01, 0x00, 0x01)
-NRF_STR_REBOOT       = (NRF_CMD_REBOOT, 0x01, 0x00, 0x01)
-NRF_STR_IQCAPTURE    = (NRF_CMD_IQCAPTURE, 0x00, 0x00, 0x01)
+NRF_CMD_USBTEST     = 0xa1
+NRF_CMD_REBOOT      = 0xa2
+NRF_CMD_IQCAP_TRIG  = 0xca
+NRF_CMD_IQCAP_NOW   = 0xcb
+NRF_STR_USBTEST     = (NRF_CMD_USBTEST, 0x01, 0x00, 0x01)
+NRF_STR_REBOOT      = (NRF_CMD_REBOOT, 0x01, 0x00, 0x01)
+NRF_STR_IQCAP_TRIG  = (NRF_CMD_IQCAP_TRIG, 0x00, 0x00, 0x01)
+NRF_STR_IQCAP_NOW   = (NRF_CMD_IQCAP_NOW, 0x00, 0x00, 0x01)
 
 BLE_FREQUENCIES = [
     2404, 2406, 2408, 2410, 2412, 2414, 2416, 2418, 2420, 2422, 2424, # 0-10
@@ -47,7 +49,7 @@ def clear_usb_pipes():
     except:
         pass
 
-def launch_gui():
+def launch_gui(args):
     if not GUI_AVAILABLE:
         print("Error: Missing GUI libraries. Run 'pip install numpy matplotlib' first.")
         sys.exit(1)
@@ -93,8 +95,17 @@ def launch_gui():
         clear_usb_pipes()
 
         # Send command
-        cmd = bytearray(NRF_STR_IQCAPTURE)
+        if args.trigger:
+            cmd = bytearray(NRF_STR_IQCAP_TRIG)
+        else:
+            cmd = bytearray(NRF_STR_IQCAP_NOW)
         cmd[1] = freq - 2400
+
+        if args.delay:
+            delay_ticks = int(float(args.delay) * 8)
+            cmd[2] = (delay_ticks >> 8) & 0xff
+            cmd[3] = delay_ticks & 0xff
+
         try:
             device.write(NRF_USB_EP_OUT, cmd)
         except Exception as e:
@@ -108,6 +119,8 @@ def launch_gui():
                 data = device.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, timeout=NRF_USB_TIMEOUT_MS)
                 raw_data.extend(data)
             except usb.core.USBError:
+                if len(raw_data) == 0 and args.trigger:
+                    continue # No data yet, keep waiting
                 break # Timeout hit, end of stream
 
         if not raw_data:
@@ -152,6 +165,7 @@ def main():
     parser.add_argument('-c', '--channel', help='start IQ capture on BLE channel')
     parser.add_argument('-f', '--frequency', help='start IQ capture on frequency (MHz)')
     parser.add_argument('-d', '--delay', help='delay after trigger before starting capture (us)')
+    parser.add_argument('-t', '--trigger', help='Wait for GPIO trigger', action='store_true')
     parser.add_argument('-u', '--usbtest', help='Send test command over USB to blink the LED', action='store_true')
     args = parser.parse_args()
 
@@ -160,7 +174,7 @@ def main():
         exit(0)
 
     if len(sys.argv) == 1 or args.gui:
-        launch_gui()
+        launch_gui(args)
         return
 
     clear_usb_pipes()
@@ -182,7 +196,10 @@ def main():
         if args.channel:
             freq = BLE_FREQUENCIES[int(args.channel)]
             print(f'Starting capture on channel {args.channel} (={freq}MHz)')
-            cmd = bytearray(NRF_STR_IQCAPTURE)
+            if args.trigger:
+                cmd = bytearray(NRF_STR_IQCAP_TRIG)
+            else:
+                cmd = bytearray(NRF_STR_IQCAP_NOW)
             cmd[1] = freq - 2400
             if args.delay:
                 delay_ticks = int(float(args.delay) * 8)
@@ -197,7 +214,10 @@ def main():
                 print(f"Exception: {e}")
         elif args.frequency:
             print(f'Starting capture on {args.frequency}MHz')
-            cmd = bytearray(NRF_STR_IQCAPTURE)
+            if args.trigger:
+                cmd = bytearray(NRF_STR_IQCAP_TRIG)
+            else:
+                cmd = bytearray(NRF_STR_IQCAP_NOW)
             cmd[1] = int(args.frequency) - 2400
             try:
                 device.write(NRF_USB_EP_OUT, cmd)
@@ -215,7 +235,7 @@ def main():
                 except usb.core.USBError as e:
                     # Handle timeout/disconnects
                     if e.errno == 110: # Timeout
-                        if length == 0:
+                        if length == 0 and args.trigger:
                             continue # No data yet, keep waiting
                         print("Capture complete (timeout)")
                     else:
