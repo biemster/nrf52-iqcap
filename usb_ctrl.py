@@ -43,20 +43,90 @@ BLE_FREQUENCIES = [
     2402, 2426, 2480                                                  # 37, 38, 39
 ]
 
-device = usb.core.find(idVendor=0xcafe, idProduct=0x4000)
-if device is not None:
-    device.set_configuration()
+class USBDevice:
+    def __init__(self, idVendor=0xcafe, idProduct=0x4000):
+        self.idVendor = idVendor
+        self.idProduct = idProduct
+        self.dev = usb.core.find(idVendor=self.idVendor, idProduct=self.idProduct)
+        if self.dev is not None:
+            try:
+                self.dev.set_configuration()
+            except Exception:
+                pass
 
-def clear_usb_pipes():
-    try:
-        device.set_configuration()
-        device.clear_halt(NRF_USB_EP_IN)
-        device.clear_halt(NRF_USB_EP_OUT)
-        device.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, 10)
-    except:
-        pass
+    def found(self):
+        return self.dev is not None
 
-def launch_gui(args):
+    def clear_pipes(self):
+        try:
+            self.dev.set_configuration()
+            self.dev.clear_halt(NRF_USB_EP_IN)
+            self.dev.clear_halt(NRF_USB_EP_OUT)
+            # try a short read to flush
+            self.dev.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, 10)
+        except Exception:
+            pass
+
+    def write(self, data):
+        if not self.found():
+            raise RuntimeError("USB device not found")
+        return self.dev.write(NRF_USB_EP_OUT, data)
+
+    def read_packet(self, timeout=NRF_USB_TIMEOUT_MS):
+        if not self.found():
+            raise RuntimeError("USB device not found")
+        return self.dev.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, timeout=timeout)
+
+    def read_stream(self, expect_trigger=False):
+        raw_data = bytearray()
+        while True:
+            try:
+                data = self.read_packet(timeout=NRF_USB_TIMEOUT_MS)
+                raw_data.extend(data)
+            except usb.core.USBError:
+                if len(raw_data) == 0 and expect_trigger:
+                    continue
+                break
+        return raw_data
+    
+    def enter_bootloader(self):
+        self.write(NRF_STR_REBOOT)
+
+    def usb_test(self):
+        self.write(NRF_STR_USBTEST)
+
+    def peek32(self, addr):
+        cmd = bytearray(NRF_STR_PEEK32)
+        cmd[4:8] = addr.to_bytes(4, 'big')
+        self.write(cmd)
+        data = self.read_packet()
+        if len(data) >= 4:
+            return int.from_bytes(data[0:4], 'big')
+        return None
+
+    def poke32(self, addr, value):
+        cmd = bytearray(NRF_STR_POKE32)
+        cmd[4:8] = addr.to_bytes(4, 'big')
+        cmd[8:12] = value.to_bytes(4, 'big')
+        self.write(cmd)
+
+    def send_iqcap(self, freq, trigger=False, delay=None):
+        if trigger:
+            cmd = bytearray(NRF_STR_IQCAP_TRIG)
+        else:
+            cmd = bytearray(NRF_STR_IQCAP_NOW)
+        cmd[1] = int(freq) - 2400
+        if delay:
+            delay_ticks = int(float(delay) * 8)
+            cmd[2] = (delay_ticks >> 8) & 0xff
+            cmd[3] = delay_ticks & 0xff
+        else:
+            cmd[2] = 0
+            cmd[3] = 1
+        self.write(cmd)
+        return self.read_stream(expect_trigger=trigger)
+
+def launch_gui(device, args):
     if not GUI_AVAILABLE:
         print("Error: Missing GUI libraries. Run 'pip install numpy matplotlib' first.")
         sys.exit(1)
@@ -91,7 +161,11 @@ def launch_gui(args):
     ttk.Label(controls_frame, text="Select Frequency:").pack(side=tk.LEFT, padx=(0, 8))
 
     combo = ttk.Combobox(controls_frame, values=channel_options, state="readonly", width=25)
-    combo.current(37) # Default to Advertising Channel 37 (2402 MHz)
+    if args.channel:
+        # If a channel argument is provided, pre-select it in the dropdown
+        combo.current(int(args.channel))
+    else:
+        combo.current(37) # Default to Advertising Channel 37 (2402 MHz)
     combo.pack(side=tk.LEFT, padx=(0, 15))
 
     def on_capture():
@@ -99,47 +173,24 @@ def launch_gui(args):
         idx = combo.current()
         freq = BLE_FREQUENCIES[idx]
 
-        clear_usb_pipes()
-
-        # Send command
-        if args.trigger:
-            cmd = bytearray(NRF_STR_IQCAP_TRIG)
-        else:
-            cmd = bytearray(NRF_STR_IQCAP_NOW)
-        cmd[1] = freq - 2400
-
-        if args.delay:
-            delay_ticks = int(float(args.delay) * 8)
-            cmd[2] = (delay_ticks >> 8) & 0xff
-            cmd[3] = delay_ticks & 0xff
+        device.clear_pipes()
 
         try:
-            device.write(NRF_USB_EP_OUT, cmd)
+            data = device.send_iqcap(freq, trigger=args.trigger, delay=args.delay)
         except Exception as e:
             messagebox.showerror("USB Error", f"Failed to send command: {e}")
             return
 
-        # Read Data
-        raw_data = bytearray()
-        while True:
-            try:
-                data = device.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, timeout=NRF_USB_TIMEOUT_MS)
-                raw_data.extend(data)
-            except usb.core.USBError:
-                if len(raw_data) == 0 and args.trigger:
-                    continue # No data yet, keep waiting
-                break # Timeout hit, end of stream
-
-        if not raw_data:
+        if not data:
             messagebox.showwarning("Warning", "No data received from USB endpoint.")
             return
 
         # Save the raw file identically to the CLI
         with open('capture.raw', 'wb') as f:
-            f.write(raw_data)
+            f.write(data)
 
         # Process the 10-bit signed IQ data
-        arr = np.frombuffer(raw_data, dtype=np.int16)
+        arr = np.frombuffer(data, dtype=np.int16)
         if len(arr) % 2 != 0:
             arr = arr[:-1]
 
@@ -159,7 +210,7 @@ def launch_gui(args):
         ax.set_aspect('equal', adjustable='datalim')
         canvas.draw()
 
-    btn = ttk.Button(controls_frame, text="Capture & Plot", command=on_capture)
+    btn = ttk.Button(controls_frame, text="Capture", command=on_capture)
     btn.pack(side=tk.LEFT)
 
     root.mainloop()
@@ -178,104 +229,51 @@ def main():
     parser.add_argument('--poke', help='Poke 32-bit value to address (addr value)', nargs=2, type=lambda x: int(x, base=0))
     args = parser.parse_args()
 
-    if device is None:
+    device = USBDevice()
+
+    if not device.found():
         print("nRF52 not found")
         exit(0)
 
     if len(sys.argv) == 1 or args.gui:
-        launch_gui(args)
+        launch_gui(device, args)
         return
 
-    clear_usb_pipes()
+    device.clear_pipes()
 
     if args.bootloader:
         print('rebooting to bootloader')
         try:
-            device.write(NRF_USB_EP_OUT, NRF_STR_REBOOT)
-            sleep(.3)
+            device.enter_bootloader()
         except Exception as e:
             print(f"Command sent (device may have reset already): {e}")
     elif args.usbtest:
         print('USB test, blinking the LED')
         try:
-            device.write(NRF_USB_EP_OUT, NRF_STR_USBTEST)
+            device.usb_test()
         except Exception as e:
             print(f"Exception: {e}")
     elif args.peek is not None:
         print(f'Peeking address 0x{args.peek:08x}')
-        cmd = bytearray(NRF_STR_PEEK32)
-        cmd[4:8] = args.peek.to_bytes(4, 'big')
-        try:
-            device.write(NRF_USB_EP_OUT, cmd)
-            data = device.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, timeout=NRF_USB_TIMEOUT_MS)
-            if len(data) >= 4:
-                peek_val = int.from_bytes(data[0:4], 'big')
-                print(f'Value at 0x{args.peek:08x} = 0x{peek_val:08x}')
-            else:
-                print("Unexpected response length")
-        except Exception as e:
-            print(f"Exception: {e}")
+        peek_val = device.peek32(args.peek)
+        print(f'Value at 0x{args.peek:08x} = 0x{peek_val:08x}')
     elif args.poke is not None:
         addr, value = args.poke
         print(f'Poking value 0x{value:08x} to address 0x{addr:08x}')
-        cmd = bytearray(NRF_STR_POKE32)
-        cmd[4:8] = addr.to_bytes(4, 'big')
-        cmd[8:12] = value.to_bytes(4, 'big')
-        try:
-            device.write(NRF_USB_EP_OUT, cmd)
-            print("Poke command sent")
-        except Exception as e:
-            print(f"Exception: {e}")
+        device.poke32(addr, value)
+        # device.usb_test()
     elif args.channel or args.frequency:
         if args.channel:
             freq = BLE_FREQUENCIES[int(args.channel)]
-            print(f'Starting capture on channel {args.channel} (={freq}MHz)')
-            if args.trigger:
-                cmd = bytearray(NRF_STR_IQCAP_TRIG)
-            else:
-                cmd = bytearray(NRF_STR_IQCAP_NOW)
-            cmd[1] = freq - 2400
-            if args.delay:
-                delay_ticks = int(float(args.delay) * 8)
-                cmd[2] = (delay_ticks >> 8) & 0xff
-                cmd[3] = delay_ticks & 0xff
-            else:
-                cmd[2] = 0
-                cmd[3] = 1
-            try:
-                device.write(NRF_USB_EP_OUT, cmd)
-            except Exception as e:
-                print(f"Exception: {e}")
+            print(f'Starting capture on channel {args.channel} ({freq} MHz)')
         elif args.frequency:
-            print(f'Starting capture on {args.frequency}MHz')
-            if args.trigger:
-                cmd = bytearray(NRF_STR_IQCAP_TRIG)
-            else:
-                cmd = bytearray(NRF_STR_IQCAP_NOW)
-            cmd[1] = int(args.frequency) - 2400
-            try:
-                device.write(NRF_USB_EP_OUT, cmd)
-            except Exception as e:
-                print(f"Exception: {e}")
-
-        # wait for capture to arrive on IN endpoint
+            freq = int(args.frequency)
+            print(f'Starting capture on {freq} MHz')
+        
+        data = device.send_iqcap(freq, trigger=args.trigger, delay=args.delay)
         with open('capture.raw', 'wb') as f:
-            length = 0
-            while True:
-                try:
-                    data = device.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, timeout=NRF_USB_TIMEOUT_MS)
-                    f.write(data)
-                    length += len(data)
-                except usb.core.USBError as e:
-                    # Handle timeout/disconnects
-                    if e.errno == 110: # Timeout
-                        if length == 0 and args.trigger:
-                            continue # No data yet, keep waiting
-                        print("Capture complete (timeout)")
-                    else:
-                        print(f"USB error: {e}")
-                    break    
-    print('done')
+            f.write(data)
+        print(f'{len(data) // 4} samples written to {f.name}')
 
 if __name__ == '__main__':
     main()
