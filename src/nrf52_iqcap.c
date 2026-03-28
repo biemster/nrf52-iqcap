@@ -11,12 +11,18 @@
 #define NRF_CMD_REBOOT    0xa2
 #define NRF_CMD_IQCAPTURE 0xca
 
+#define TRIG_TIMER			NRF_TIMER2
+#define TRIG_TIMER_IRQn		TIMER2_IRQn
+#define TRIG_GPIOTE_CHAN	2
+#define TRIG_PPI_CHAN		2 	
+
 #define LED     (1 << 15) // the red led on the nice!nano
 #define MAXSAMP (16*1024)
 __attribute__((aligned(8192))) static uint32_t iq_buf[MAXSAMP];
 
 static volatile int gs_usb_cmd;
 static volatile int gs_capture_freq;
+static volatile int gs_capture_delay;
 
 void main_loop(void);
 
@@ -42,6 +48,18 @@ enum {
 void HardFault_Handler(void) {
 	NRF_P0->OUTSET = LED; // Force LED on to show we crashed
 	while(1) { __NOP(); }
+}
+
+void TIMER2_IRQHandler(void) {
+	// Trigger IQ capture: inlined radio_trigger_iq_capture()
+	RADIO_REG(TASKS_IQCAP) = 1;
+
+	// Reset the timer
+	NRF_TIMER2->EVENTS_COMPARE[0] = 0;
+	// Disable the PPI channel until the next trigger
+	NRF_PPI->CHENCLR = (1 << TRIG_PPI_CHAN);
+	// Turn off the LED when triggered
+	NRF_P0->OUTCLR = LED;
 }
 
 void USBD_IRQHandler(void) {
@@ -124,6 +142,52 @@ void delay_us(uint32_t us) {
 }
 void delay_ms(uint32_t ms) { delay_us(ms *1000); }
 
+void timer2_init(void) {
+	// Configure TIMER2 as a 32 bit one-shot timer at 16 MHz
+	// Counts from 0 to CC[0], then fires the IRQ, resets to 0, and stops
+	TRIG_TIMER->MODE = TIMER_MODE_MODE_Timer;
+	TRIG_TIMER->PRESCALER = 1; // 16 MHz / 1
+	TRIG_TIMER->BITMODE = TIMER_BITMODE_BITMODE_32Bit << TIMER_BITMODE_BITMODE_Pos;
+	TRIG_TIMER->TASKS_STOP = 1;
+	TRIG_TIMER->TASKS_CLEAR = 1;
+	// One-shot mode: stop the timer when it reaches the compare value
+	TRIG_TIMER->SHORTS = TIMER_SHORTS_COMPARE0_STOP_Msk | TIMER_SHORTS_COMPARE0_CLEAR_Msk;
+	TRIG_TIMER->INTENSET = TIMER_INTENSET_COMPARE0_Msk;
+
+	NVIC_EnableIRQ(TRIG_TIMER_IRQn);
+}
+
+void init_trigger(int port, int pin, bool active_high) {
+	// Configure pin as input with pull-up/down as needed
+	(port ? NRF_P1 : NRF_P0)->PIN_CNF[pin] = 
+		(GPIO_PIN_CNF_DIR_Input << GPIO_PIN_CNF_DIR_Pos) |
+		((active_high ? GPIO_PIN_CNF_PULL_Pulldown : GPIO_PIN_CNF_PULL_Pullup) << GPIO_PIN_CNF_PULL_Pos);
+
+	// Configure GPIOTE channel 0 to generate an event on a rising edge on the specified pin
+	NRF_GPIOTE->CONFIG[TRIG_GPIOTE_CHAN] = (GPIOTE_CONFIG_MODE_Event << GPIOTE_CONFIG_MODE_Pos) |
+							(port << GPIOTE_CONFIG_PORT_Pos) |
+							(pin << GPIOTE_CONFIG_PSEL_Pos) |
+							((active_high ? GPIOTE_CONFIG_POLARITY_LoToHi : GPIOTE_CONFIG_POLARITY_HiToLo) << GPIOTE_CONFIG_POLARITY_Pos);
+	NRF_PPI->CH[TRIG_PPI_CHAN].EEP = (uint32_t) &NRF_GPIOTE->EVENTS_IN[TRIG_GPIOTE_CHAN];
+	NRF_PPI->CH[TRIG_PPI_CHAN].TEP =  (uint32_t) &TRIG_TIMER->TASKS_START;
+	// Disable PPI channel until we arm trigger
+	NRF_PPI->CHENCLR = (1 << TRIG_PPI_CHAN);
+}
+	
+
+void set_trigger(uint32_t delay_ticks) {
+	// Set the timer for the specified delay (in 16 MHz ticks)
+	NRF_TIMER2->CC[0] = delay_ticks;
+	NRF_TIMER2->TASKS_CLEAR = 1;
+
+	// Enable the PPI channel to start the timer on the next trigger event
+	NRF_GPIOTE->EVENTS_IN[TRIG_GPIOTE_CHAN] = 0; // Clear any pending events
+	NRF_PPI->CHENSET = (1 << TRIG_PPI_CHAN);
+
+	// Turn on the LED when armed
+	NRF_P0->OUTSET = LED;
+}
+
 void jump_bootloader() {
 	// go back to uf2 bootloader
 	NRF_POWER->GPREGRET = 0x57; // 0x57 tells the Adafruit UF2 bootloader to stay in bootloader mode
@@ -164,12 +228,29 @@ void tud_vendor_rx_cb(uint8_t intf, const uint8_t *buffer, uint32_t bufsize) {
 				break;
 			case NRF_CMD_IQCAPTURE:
 				gs_capture_freq = 2400 +buf[1];
+				gs_capture_delay = (buf[2] << 8) | buf[3];
 				break;
 			default:
 				break;
 			}
 		}
 	}
+}
+
+void arm_capture(int freq, int delay_ticks) {
+
+	init_radio(/*access address*/0, freq);
+
+	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
+	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
+
+	radio_set_iq_capture(iq_buf, MAXSAMP);
+	radio_start_rx();
+
+	radio_wait_for_state(NRF_RADIO_STATE_RX);
+	delay_us(10);
+
+	set_trigger(delay_ticks);
 }
 
 void iqcapture(int freq) {
@@ -194,19 +275,19 @@ void iqcapture(int freq) {
 	}
 }
 
-void bulk_send() {
-	uint32_t total_bytes = MAXSAMP * sizeof(iq_buf[0]);
+void bulk_send(uint32_t *buf, int nsamp) {
+	uint32_t total_bytes = nsamp * sizeof(uint32_t);
 	uint32_t bytes_sent = 0;
-	uint8_t* ptr = (uint8_t*)iq_buf;
+	uint8_t* ptr = (uint8_t*)buf;
 
 	// Convert in place to sign extend 12-bit samples
-	for(int i = 0; i < MAXSAMP; i++) {
-		uint32_t val = iq_buf[i];
+	for(int i = 0; i < nsamp; i++) {
+		uint32_t val = buf[i];
 
 		int16_t i_sample = (int16_t)( ((int32_t)(val << 20)) >> 20 );
 		int16_t q_sample = (int16_t)( ((int32_t)(val << 8))  >> 20 );
 
-		iq_buf[i] = (i_sample << 16) | (q_sample & 0xFFFF);
+		buf[i] = (i_sample << 16) | (q_sample & 0xFFFF);
 
 		// Yield to TinyUSB every 512 iterations so the USB connection doesn't drop
 		if ((i % 256) == 0) {
@@ -244,12 +325,18 @@ void usb_cmd_handler() {
 			blink(2);
 			break;
 		case NRF_CMD_IQCAPTURE:
-			iqcapture(gs_capture_freq);
-			bulk_send();
-			blink(2);
+			arm_capture(gs_capture_freq, gs_capture_delay);
 			break;
 		}
 		gs_usb_cmd = 0;
+	}
+}
+
+void capture_handler() {
+	if (nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND)) {
+		nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
+		bulk_send(iq_buf, MAXSAMP);
+		blink(2);
 	}
 }
 
@@ -260,6 +347,9 @@ void main(void) {
 
 	clock_init();
 	delay_init();
+	timer2_init();
+	// Trigger on falling edge of P0.17
+	init_trigger(0, 17, false);
 
 	// LED
 	NRF_P0->DIRSET = LED;
@@ -274,5 +364,6 @@ void main(void) {
 	while(1) {
 		tud_task();
 		usb_cmd_handler();
+		capture_handler();
 	}
 }

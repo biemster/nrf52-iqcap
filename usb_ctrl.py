@@ -151,6 +151,7 @@ def main():
     parser.add_argument('-b', '--bootloader', help='Reboot to bootloader', action='store_true')
     parser.add_argument('-c', '--channel', help='start IQ capture on BLE channel')
     parser.add_argument('-f', '--frequency', help='start IQ capture on frequency (MHz)')
+    parser.add_argument('-d', '--delay', help='delay after trigger before starting capture (us)')
     parser.add_argument('-u', '--usbtest', help='Send test command over USB to blink the LED', action='store_true')
     args = parser.parse_args()
 
@@ -183,6 +184,13 @@ def main():
             print(f'Starting capture on channel {args.channel} (={freq}MHz)')
             cmd = bytearray(NRF_STR_IQCAPTURE)
             cmd[1] = freq - 2400
+            if args.delay:
+                delay_ticks = int(float(args.delay) * 8)
+                cmd[2] = (delay_ticks >> 8) & 0xff
+                cmd[3] = delay_ticks & 0xff
+            else:
+                cmd[2] = 0
+                cmd[3] = 1
             try:
                 device.write(NRF_USB_EP_OUT, cmd)
             except Exception as e:
@@ -198,12 +206,20 @@ def main():
 
         # wait for capture to arrive on IN endpoint
         with open('capture.raw', 'wb') as f:
+            length = 0
             while True:
                 try:
                     data = device.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, timeout=NRF_USB_TIMEOUT_MS)
                     f.write(data)
+                    length += len(data)
                 except usb.core.USBError as e:
                     # Handle timeout/disconnects
+                    if e.errno == 110: # Timeout
+                        if length == 0:
+                            continue # No data yet, keep waiting
+                        print("Capture complete (timeout)")
+                    else:
+                        print(f"USB error: {e}")
                     break    
     print('done')
 
