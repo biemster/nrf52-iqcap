@@ -7,15 +7,15 @@
 #include "rfx.h"
 #include "tusb.h"
 
-#define NRF_CMD_USBTEST   		0xa1
-#define NRF_CMD_REBOOT    		0xa2
-#define NRF_CMD_IQCAPTURE_TRIG 	0xca
-#define NRF_CMD_IQCAPTURE_NOW 	0xcb
+#define NRF_CMD_USBTEST         0xa1
+#define NRF_CMD_REBOOT          0xa2
+#define NRF_CMD_IQCAPTURE_TRIG  0xca
+#define NRF_CMD_IQCAPTURE_NOW   0xcb
 
-#define TRIG_TIMER			NRF_TIMER2
-#define TRIG_TIMER_IRQn		TIMER2_IRQn
-#define TRIG_GPIOTE_CHAN	2
-#define TRIG_PPI_CHAN		2 	
+#define TRIG_TIMER              NRF_TIMER2
+#define TRIG_TIMER_IRQn         TIMER2_IRQn
+#define TRIG_GPIOTE_CHAN        2
+#define TRIG_PPI_CHAN           2
 
 #define LED     (1 << 15) // the red led on the nice!nano
 #define MAXSAMP (16*1024)
@@ -41,331 +41,331 @@ extern void tusb_hal_nrf_power_event(uint32_t event);
 
 // Value is chosen to be as same as NRFX_POWER_USB_EVT_* in nrfx_power.h
 enum {
-	USB_EVT_DETECTED = 0,
-	USB_EVT_REMOVED = 1,
-	USB_EVT_READY = 2
+    USB_EVT_DETECTED = 0,
+    USB_EVT_REMOVED = 1,
+    USB_EVT_READY = 2
 };
 
 void HardFault_Handler(void) {
-	NRF_P0->OUTSET = LED; // Force LED on to show we crashed
-	while(1) { __NOP(); }
+    NRF_P0->OUTSET = LED; // Force LED on to show we crashed
+    while(1) { __NOP(); }
 }
 
 void TIMER2_IRQHandler(void) {
-	// Trigger IQ capture: inlined radio_trigger_iq_capture()
-	RADIO_REG(TASKS_IQCAP) = 1;
+    // Trigger IQ capture: inlined radio_trigger_iq_capture()
+    RADIO_REG(TASKS_IQCAP) = 1;
 
-	// Reset the timer
-	NRF_TIMER2->EVENTS_COMPARE[0] = 0;
-	// Disable the PPI channel until the next trigger
-	NRF_PPI->CHENCLR = (1 << TRIG_PPI_CHAN);
-	// Turn off the LED when triggered
-	NRF_P0->OUTCLR = LED;
+    // Reset the timer
+    NRF_TIMER2->EVENTS_COMPARE[0] = 0;
+    // Disable the PPI channel until the next trigger
+    NRF_PPI->CHENCLR = (1 << TRIG_PPI_CHAN);
+    // Turn off the LED when triggered
+    NRF_P0->OUTCLR = LED;
 }
 
 void USBD_IRQHandler(void) {
-	tud_int_handler(0);
+    tud_int_handler(0);
 }
 
 void POWER_CLOCK_IRQHandler(void) {
-	uint32_t inten = NRF_POWER->INTENSET;
+    uint32_t inten = NRF_POWER->INTENSET;
 
-	// Cable plugged in
-	if ((inten & POWER_INTENSET_USBDETECTED_Msk) && NRF_POWER->EVENTS_USBDETECTED) {
-		NRF_POWER->EVENTS_USBDETECTED = 0;
-		tusb_hal_nrf_power_event(USB_EVT_DETECTED);
-	}
+    // Cable plugged in
+    if ((inten & POWER_INTENSET_USBDETECTED_Msk) && NRF_POWER->EVENTS_USBDETECTED) {
+        NRF_POWER->EVENTS_USBDETECTED = 0;
+        tusb_hal_nrf_power_event(USB_EVT_DETECTED);
+    }
 
-	// Cable unplugged
-	if ((inten & POWER_INTENSET_USBREMOVED_Msk) && NRF_POWER->EVENTS_USBREMOVED) {
-		NRF_POWER->EVENTS_USBREMOVED = 0;
-		tusb_hal_nrf_power_event(USB_EVT_REMOVED);
-	}
+    // Cable unplugged
+    if ((inten & POWER_INTENSET_USBREMOVED_Msk) && NRF_POWER->EVENTS_USBREMOVED) {
+        NRF_POWER->EVENTS_USBREMOVED = 0;
+        tusb_hal_nrf_power_event(USB_EVT_REMOVED);
+    }
 
-	// Power ready to use
-	if ((inten & POWER_INTENSET_USBPWRRDY_Msk) && NRF_POWER->EVENTS_USBPWRRDY) {
-		NRF_POWER->EVENTS_USBPWRRDY = 0;
-		tusb_hal_nrf_power_event(USB_EVT_READY);
-	}
+    // Power ready to use
+    if ((inten & POWER_INTENSET_USBPWRRDY_Msk) && NRF_POWER->EVENTS_USBPWRRDY) {
+        NRF_POWER->EVENTS_USBPWRRDY = 0;
+        tusb_hal_nrf_power_event(USB_EVT_READY);
+    }
 }
 
 void init_usb_power_irq(void) {
-	// Enable events for USB insertion, removal, and power ready
-	NRF_POWER->INTENSET = (POWER_INTENSET_USBDETECTED_Msk |
-						   POWER_INTENSET_USBREMOVED_Msk  |
-						   POWER_INTENSET_USBPWRRDY_Msk);
+    // Enable events for USB insertion, removal, and power ready
+    NRF_POWER->INTENSET = (POWER_INTENSET_USBDETECTED_Msk |
+                           POWER_INTENSET_USBREMOVED_Msk  |
+                           POWER_INTENSET_USBPWRRDY_Msk);
 
-	// Enable the POWER_CLOCK IRQ in the NVIC
-	NVIC_EnableIRQ(POWER_CLOCK_IRQn);
+    // Enable the POWER_CLOCK IRQ in the NVIC
+    NVIC_EnableIRQ(POWER_CLOCK_IRQn);
 
-	// USB power may already be ready at this time -> no event generated
-	// We need to invoke the handler based on the status initially
-	uint32_t usb_reg = NRF_POWER->USBREGSTATUS;
-	if ( usb_reg & POWER_USBREGSTATUS_VBUSDETECT_Msk ) {
-		tusb_hal_nrf_power_event(USB_EVT_DETECTED);
-	}
-	if ( usb_reg & POWER_USBREGSTATUS_OUTPUTRDY_Msk  ) {
-		tusb_hal_nrf_power_event(USB_EVT_READY);
-	}
+    // USB power may already be ready at this time -> no event generated
+    // We need to invoke the handler based on the status initially
+    uint32_t usb_reg = NRF_POWER->USBREGSTATUS;
+    if ( usb_reg & POWER_USBREGSTATUS_VBUSDETECT_Msk ) {
+        tusb_hal_nrf_power_event(USB_EVT_DETECTED);
+    }
+    if ( usb_reg & POWER_USBREGSTATUS_OUTPUTRDY_Msk  ) {
+        tusb_hal_nrf_power_event(USB_EVT_READY);
+    }
 }
 
 void clock_init() {
-	// Start LFCLK (Low Frequency Clock)
-	NRF_CLOCK->EVENTS_LFCLKSTARTED = 0;
-	NRF_CLOCK->TASKS_LFCLKSTART = 1;
-	while (NRF_CLOCK->EVENTS_LFCLKSTARTED == 0) {
-		// Wait for LFCLK to start
-	}
+    // Start LFCLK (Low Frequency Clock)
+    NRF_CLOCK->EVENTS_LFCLKSTARTED = 0;
+    NRF_CLOCK->TASKS_LFCLKSTART = 1;
+    while (NRF_CLOCK->EVENTS_LFCLKSTARTED == 0) {
+        // Wait for LFCLK to start
+    }
 
-	// Start HFCLK (High Frequency 32MHz Crystal)
-	NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
-	NRF_CLOCK->TASKS_HFCLKSTART = 1;
-	while (NRF_CLOCK->EVENTS_HFCLKSTARTED == 0) {
-		// Wait for HFCLK to stabilize
-	}
+    // Start HFCLK (High Frequency 32MHz Crystal)
+    NRF_CLOCK->EVENTS_HFCLKSTARTED = 0;
+    NRF_CLOCK->TASKS_HFCLKSTART = 1;
+    while (NRF_CLOCK->EVENTS_HFCLKSTARTED == 0) {
+        // Wait for HFCLK to stabilize
+    }
 }
 
 void delay_init(void) {
-	// Enable the Trace and Debug block
-	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
-	DWT->CYCCNT = 0; // Clear the cycle counter
-	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk; // Enable the cycle counter
+    // Enable the Trace and Debug block
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0; // Clear the cycle counter
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk; // Enable the cycle counter
 }
 
 void delay_us(uint32_t us) {
-	uint32_t start = DWT->CYCCNT;
+    uint32_t start = DWT->CYCCNT;
 
-	// nRF52840 runs at 64 MHz. Therefore, 64 cycles = 1 microsecond.
-	uint32_t delay_ticks = us * 64;
-	while ((DWT->CYCCNT - start) < delay_ticks) {
-		__NOP();
-	}
+    // nRF52840 runs at 64 MHz. Therefore, 64 cycles = 1 microsecond.
+    uint32_t delay_ticks = us * 64;
+    while ((DWT->CYCCNT - start) < delay_ticks) {
+        __NOP();
+    }
 }
 void delay_ms(uint32_t ms) { delay_us(ms *1000); }
 
 void timer2_init(void) {
-	// Configure TIMER2 as a 32 bit one-shot timer at 16 MHz
-	// Counts from 0 to CC[0], then fires the IRQ, resets to 0, and stops
-	TRIG_TIMER->MODE = TIMER_MODE_MODE_Timer;
-	TRIG_TIMER->PRESCALER = 1; // 16 MHz / 1
-	TRIG_TIMER->BITMODE = TIMER_BITMODE_BITMODE_32Bit << TIMER_BITMODE_BITMODE_Pos;
-	TRIG_TIMER->TASKS_STOP = 1;
-	TRIG_TIMER->TASKS_CLEAR = 1;
-	// One-shot mode: stop the timer when it reaches the compare value
-	TRIG_TIMER->SHORTS = TIMER_SHORTS_COMPARE0_STOP_Msk | TIMER_SHORTS_COMPARE0_CLEAR_Msk;
-	TRIG_TIMER->INTENSET = TIMER_INTENSET_COMPARE0_Msk;
+    // Configure TIMER2 as a 32 bit one-shot timer at 16 MHz
+    // Counts from 0 to CC[0], then fires the IRQ, resets to 0, and stops
+    TRIG_TIMER->MODE = TIMER_MODE_MODE_Timer;
+    TRIG_TIMER->PRESCALER = 1; // 16 MHz / 1
+    TRIG_TIMER->BITMODE = TIMER_BITMODE_BITMODE_32Bit << TIMER_BITMODE_BITMODE_Pos;
+    TRIG_TIMER->TASKS_STOP = 1;
+    TRIG_TIMER->TASKS_CLEAR = 1;
+    // One-shot mode: stop the timer when it reaches the compare value
+    TRIG_TIMER->SHORTS = TIMER_SHORTS_COMPARE0_STOP_Msk | TIMER_SHORTS_COMPARE0_CLEAR_Msk;
+    TRIG_TIMER->INTENSET = TIMER_INTENSET_COMPARE0_Msk;
 
-	NVIC_EnableIRQ(TRIG_TIMER_IRQn);
+    NVIC_EnableIRQ(TRIG_TIMER_IRQn);
 }
 
 void init_trigger(int port, int pin, bool active_high) {
-	// Configure pin as input with pull-up/down as needed
-	(port ? NRF_P1 : NRF_P0)->PIN_CNF[pin] = 
-		(GPIO_PIN_CNF_DIR_Input << GPIO_PIN_CNF_DIR_Pos) |
-		((active_high ? GPIO_PIN_CNF_PULL_Pulldown : GPIO_PIN_CNF_PULL_Pullup) << GPIO_PIN_CNF_PULL_Pos);
+    // Configure pin as input with pull-up/down as needed
+    (port ? NRF_P1 : NRF_P0)->PIN_CNF[pin] =
+        (GPIO_PIN_CNF_DIR_Input << GPIO_PIN_CNF_DIR_Pos) |
+        ((active_high ? GPIO_PIN_CNF_PULL_Pulldown : GPIO_PIN_CNF_PULL_Pullup) << GPIO_PIN_CNF_PULL_Pos);
 
-	// Configure GPIOTE channel 0 to generate an event on a rising edge on the specified pin
-	NRF_GPIOTE->CONFIG[TRIG_GPIOTE_CHAN] = (GPIOTE_CONFIG_MODE_Event << GPIOTE_CONFIG_MODE_Pos) |
-							(port << GPIOTE_CONFIG_PORT_Pos) |
-							(pin << GPIOTE_CONFIG_PSEL_Pos) |
-							((active_high ? GPIOTE_CONFIG_POLARITY_LoToHi : GPIOTE_CONFIG_POLARITY_HiToLo) << GPIOTE_CONFIG_POLARITY_Pos);
-	NRF_PPI->CH[TRIG_PPI_CHAN].EEP = (uint32_t) &NRF_GPIOTE->EVENTS_IN[TRIG_GPIOTE_CHAN];
-	NRF_PPI->CH[TRIG_PPI_CHAN].TEP =  (uint32_t) &TRIG_TIMER->TASKS_START;
-	// Disable PPI channel until we arm trigger
-	NRF_PPI->CHENCLR = (1 << TRIG_PPI_CHAN);
+    // Configure GPIOTE channel 0 to generate an event on a rising edge on the specified pin
+    NRF_GPIOTE->CONFIG[TRIG_GPIOTE_CHAN] = (GPIOTE_CONFIG_MODE_Event << GPIOTE_CONFIG_MODE_Pos) |
+                            (port << GPIOTE_CONFIG_PORT_Pos) |
+                            (pin << GPIOTE_CONFIG_PSEL_Pos) |
+                            ((active_high ? GPIOTE_CONFIG_POLARITY_LoToHi : GPIOTE_CONFIG_POLARITY_HiToLo) << GPIOTE_CONFIG_POLARITY_Pos);
+    NRF_PPI->CH[TRIG_PPI_CHAN].EEP = (uint32_t) &NRF_GPIOTE->EVENTS_IN[TRIG_GPIOTE_CHAN];
+    NRF_PPI->CH[TRIG_PPI_CHAN].TEP =  (uint32_t) &TRIG_TIMER->TASKS_START;
+    // Disable PPI channel until we arm trigger
+    NRF_PPI->CHENCLR = (1 << TRIG_PPI_CHAN);
 }
-	
+
 
 void set_trigger(uint32_t delay_ticks) {
-	// Set the timer for the specified delay (in 16 MHz ticks)
-	NRF_TIMER2->CC[0] = delay_ticks;
-	NRF_TIMER2->TASKS_CLEAR = 1;
+    // Set the timer for the specified delay (in 16 MHz ticks)
+    NRF_TIMER2->CC[0] = delay_ticks;
+    NRF_TIMER2->TASKS_CLEAR = 1;
 
-	// Enable the PPI channel to start the timer on the next trigger event
-	NRF_GPIOTE->EVENTS_IN[TRIG_GPIOTE_CHAN] = 0; // Clear any pending events
-	NRF_PPI->CHENSET = (1 << TRIG_PPI_CHAN);
+    // Enable the PPI channel to start the timer on the next trigger event
+    NRF_GPIOTE->EVENTS_IN[TRIG_GPIOTE_CHAN] = 0; // Clear any pending events
+    NRF_PPI->CHENSET = (1 << TRIG_PPI_CHAN);
 
-	// Turn on the LED when armed
-	NRF_P0->OUTSET = LED;
+    // Turn on the LED when armed
+    NRF_P0->OUTSET = LED;
 }
 
 void jump_bootloader() {
-	// go back to uf2 bootloader
-	NRF_POWER->GPREGRET = 0x57; // 0x57 tells the Adafruit UF2 bootloader to stay in bootloader mode
-	NVIC_SystemReset();         // Reboot the chip
+    // go back to uf2 bootloader
+    NRF_POWER->GPREGRET = 0x57; // 0x57 tells the Adafruit UF2 bootloader to stay in bootloader mode
+    NVIC_SystemReset();         // Reboot the chip
 }
 
 void blink(int n) {
-	for(int i = n-1; i >= 0; i--) {
-		NRF_P0->OUTSET = LED;
-		delay_ms(33);
-		NRF_P0->OUTCLR = LED;
-		if(i) delay_ms(33);
-	}
+    for(int i = n-1; i >= 0; i--) {
+        NRF_P0->OUTSET = LED;
+        delay_ms(33);
+        NRF_P0->OUTCLR = LED;
+        if(i) delay_ms(33);
+    }
 }
 
 void tud_mount_cb(void) {
-	tud_vendor_write_clear();
+    tud_vendor_write_clear();
 
-	uint8_t dump_buf[64];
-	while (tud_vendor_available()) {
-		tud_vendor_read(dump_buf, sizeof(dump_buf));
-	}
+    uint8_t dump_buf[64];
+    while (tud_vendor_available()) {
+        tud_vendor_read(dump_buf, sizeof(dump_buf));
+    }
 
-	gs_usb_cmd = 0;
+    gs_usb_cmd = 0;
 }
 
 void tud_vendor_rx_cb(uint8_t intf, const uint8_t *buffer, uint32_t bufsize) {
-	// - CFG_TUD_VENDOR_TXRX_BUFFERED = 1: buffer and bufsize must not be used (both NULL,0) since data is in RX FIFO
-	uint8_t buf[64]; // Buffer to hold the incoming command
+    // - CFG_TUD_VENDOR_TXRX_BUFFERED = 1: buffer and bufsize must not be used (both NULL,0) since data is in RX FIFO
+    uint8_t buf[64]; // Buffer to hold the incoming command
 
-	while (tud_vendor_available() > 0) {
-		uint32_t bytes_read = tud_vendor_read(buf, sizeof(buf));
-		if( (bytes_read == 4) && !gs_usb_cmd) {
-			gs_usb_cmd = buf[0];
-			switch(gs_usb_cmd) {
-			case NRF_CMD_REBOOT:
-			case NRF_CMD_USBTEST:
-				break;
-			case NRF_CMD_IQCAPTURE_TRIG:
-				gs_capture_freq = 2400 +buf[1];
-				gs_capture_delay = (buf[2] << 8) | buf[3];
-				break;
-			case NRF_CMD_IQCAPTURE_NOW:
-				gs_capture_freq = 2400 +buf[1];
-				gs_capture_delay = 1;
-				break;
-			default:
-				break;
-			}
-		}
-	}
+    while (tud_vendor_available() > 0) {
+        uint32_t bytes_read = tud_vendor_read(buf, sizeof(buf));
+        if( (bytes_read == 4) && !gs_usb_cmd) {
+            gs_usb_cmd = buf[0];
+            switch(gs_usb_cmd) {
+            case NRF_CMD_REBOOT:
+            case NRF_CMD_USBTEST:
+                break;
+            case NRF_CMD_IQCAPTURE_TRIG:
+                gs_capture_freq = 2400 +buf[1];
+                gs_capture_delay = (buf[2] << 8) | buf[3];
+                break;
+            case NRF_CMD_IQCAPTURE_NOW:
+                gs_capture_freq = 2400 +buf[1];
+                gs_capture_delay = 1;
+                break;
+            default:
+                break;
+            }
+        }
+    }
 }
 
 void arm_capture(int freq, int delay_ticks) {
 
-	init_radio(/*access address*/0, freq);
+    init_radio(/*access address*/0, freq);
 
-	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
-	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
+    nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
+    nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
 
-	radio_set_iq_capture(iq_buf, MAXSAMP);
-	radio_start_rx();
+    radio_set_iq_capture(iq_buf, MAXSAMP);
+    radio_start_rx();
 
-	radio_wait_for_state(NRF_RADIO_STATE_RX);
-	delay_us(10);
+    radio_wait_for_state(NRF_RADIO_STATE_RX);
+    delay_us(10);
 
-	set_trigger(delay_ticks);
+    set_trigger(delay_ticks);
 }
 
 void iq_capture(int freq) {
-	init_radio(/*access address*/0, freq);
+    init_radio(/*access address*/0, freq);
 
-	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
-	nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
+    nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
+    nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
 
-	radio_set_iq_capture(iq_buf, MAXSAMP);
-	radio_start_rx();
+    radio_set_iq_capture(iq_buf, MAXSAMP);
+    radio_start_rx();
 
-	radio_wait_for_state(NRF_RADIO_STATE_RX);
-	delay_us(10);
+    radio_wait_for_state(NRF_RADIO_STATE_RX);
+    delay_us(10);
 
-	// Trigger IQ capture immediately
-	radio_trigger_iq_capture();
+    // Trigger IQ capture immediately
+    radio_trigger_iq_capture();
 }
 
 void bulk_send(uint32_t *buf, int nsamp) {
-	uint32_t total_bytes = nsamp * sizeof(uint32_t);
-	uint32_t bytes_sent = 0;
-	uint8_t* ptr = (uint8_t*)buf;
+    uint32_t total_bytes = nsamp * sizeof(uint32_t);
+    uint32_t bytes_sent = 0;
+    uint8_t* ptr = (uint8_t*)buf;
 
-	// Convert in place to sign extend 12-bit samples
-	for(int i = 0; i < nsamp; i++) {
-		uint32_t val = buf[i];
+    // Convert in place to sign extend 12-bit samples
+    for(int i = 0; i < nsamp; i++) {
+        uint32_t val = buf[i];
 
-		int16_t i_sample = (int16_t)( ((int32_t)(val << 20)) >> 20 );
-		int16_t q_sample = (int16_t)( ((int32_t)(val << 8))  >> 20 );
+        int16_t i_sample = (int16_t)( ((int32_t)(val << 20)) >> 20 );
+        int16_t q_sample = (int16_t)( ((int32_t)(val << 8))  >> 20 );
 
-		buf[i] = (i_sample << 16) | (q_sample & 0xFFFF);
+        buf[i] = (i_sample << 16) | (q_sample & 0xFFFF);
 
-		// Yield to TinyUSB every 512 iterations so the USB connection doesn't drop
-		if ((i % 256) == 0) {
-			tud_task();
-		}
-	}
+        // Yield to TinyUSB every 512 iterations so the USB connection doesn't drop
+        if ((i % 256) == 0) {
+            tud_task();
+        }
+    }
 
-	while ((bytes_sent < total_bytes) && tud_vendor_mounted()) {
-		// Calculate remaining bytes, but cap the request to 1024 bytes
-		uint32_t chunk = total_bytes - bytes_sent;
-		if (chunk > 1024) {
-			chunk = 1024;
-		}
+    while ((bytes_sent < total_bytes) && tud_vendor_mounted()) {
+        // Calculate remaining bytes, but cap the request to 1024 bytes
+        uint32_t chunk = total_bytes - bytes_sent;
+        if (chunk > 1024) {
+            chunk = 1024;
+        }
 
-		uint32_t pushed = tud_vendor_write(ptr, chunk);
-		if (pushed > 0) {
-			ptr += pushed;
-			bytes_sent += pushed;
-			tud_vendor_write_flush(); // Tell TinyUSB the data is ready to go
-		}
+        uint32_t pushed = tud_vendor_write(ptr, chunk);
+        if (pushed > 0) {
+            ptr += pushed;
+            bytes_sent += pushed;
+            tud_vendor_write_flush(); // Tell TinyUSB the data is ready to go
+        }
 
-		// Keep the USB state machine moving
-		tud_task();
-	}
+        // Keep the USB state machine moving
+        tud_task();
+    }
 }
 
 void usb_cmd_handler() {
-	if(gs_usb_cmd) {
-		switch(gs_usb_cmd) {
-		case NRF_CMD_REBOOT:
-			blink(3);
-			jump_bootloader();
-			break;
-		case NRF_CMD_USBTEST:
-			blink(2);
-			break;
-		case NRF_CMD_IQCAPTURE_TRIG:
-			arm_capture(gs_capture_freq, gs_capture_delay);
-			break;
-		case NRF_CMD_IQCAPTURE_NOW:
-			iq_capture(gs_capture_freq);
-			break;
-		}
-		gs_usb_cmd = 0;
-	}
+    if(gs_usb_cmd) {
+        switch(gs_usb_cmd) {
+        case NRF_CMD_REBOOT:
+            blink(3);
+            jump_bootloader();
+            break;
+        case NRF_CMD_USBTEST:
+            blink(2);
+            break;
+        case NRF_CMD_IQCAPTURE_TRIG:
+            arm_capture(gs_capture_freq, gs_capture_delay);
+            break;
+        case NRF_CMD_IQCAPTURE_NOW:
+            iq_capture(gs_capture_freq);
+            break;
+        }
+        gs_usb_cmd = 0;
+    }
 }
 
 void capture_handler() {
-	if (nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND)) {
-		nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
-		bulk_send(iq_buf, MAXSAMP);
-		blink(2);
-	}
+    if (nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND)) {
+        nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
+        bulk_send(iq_buf, MAXSAMP);
+        blink(2);
+    }
 }
 
 // entry point
 void main(void) {
-	// Relocate the interrupt vector table to the app start address for UF2
-	SCB->VTOR = 0x26000;
+    // Relocate the interrupt vector table to the app start address for UF2
+    SCB->VTOR = 0x26000;
 
-	clock_init();
-	delay_init();
-	timer2_init();
-	// Trigger on falling edge of P0.17
-	init_trigger(0, 17, false);
+    clock_init();
+    delay_init();
+    timer2_init();
+    // Trigger on falling edge of P0.17
+    init_trigger(0, 17, false);
 
-	// LED
-	NRF_P0->DIRSET = LED;
-	NRF_P0->OUTCLR = LED;
+    // LED
+    NRF_P0->DIRSET = LED;
+    NRF_P0->OUTCLR = LED;
 
-	// Init USB
-	init_usb_power_irq();
-	tusb_init();
-	NVIC_EnableIRQ(USBD_IRQn);
+    // Init USB
+    init_usb_power_irq();
+    tusb_init();
+    NVIC_EnableIRQ(USBD_IRQn);
 
-	blink(3);
-	while(1) {
-		tud_task();
-		usb_cmd_handler();
-		capture_handler();
-	}
+    blink(3);
+    while(1) {
+        tud_task();
+        usb_cmd_handler();
+        capture_handler();
+    }
 }
