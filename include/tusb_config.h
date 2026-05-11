@@ -5,12 +5,13 @@
  extern "C" {
 #endif
 
+#define CFG_TUSB_DEBUG             0
 //--------------------------------------------------------------------
 // RHPort (Root Hub Port) Configuration
 //--------------------------------------------------------------------
 // For nRF52840, we use the onboard USB peripheral (0)
 // OPT_MODE_DEVICE means this board acts as a USB device (not a host)
-#define CFG_TUSB_RHPORT0_MODE   OPT_MODE_DEVICE
+#define CFG_TUSB_RHPORT0_MODE      OPT_MODE_DEVICE
 
 // If you are NOT using a second USB controller, 
 // you can leave RHPORT1 undefined or set to 0.
@@ -23,7 +24,7 @@
 // nRF52840 USB peripheral uses EasyDMA. 
 // TinyUSB handles this gracefully, but memory needs to be aligned.
 #define CFG_TUSB_MEM_SECTION
-#define CFG_TUSB_MEM_ALIGN         __attribute__ ((aligned(4)))
+#define CFG_TUSB_MEM_ALIGN         __attribute__ ((aligned(8192)))
 
 // -- Device Configuration --
 #define CFG_TUD_ENDPOINT0_SIZE     64

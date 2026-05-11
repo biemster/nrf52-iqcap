@@ -6,25 +6,34 @@
 #include "nrf.h"
 #include "rfx.h"
 #include "tusb.h"
+#include "device/usbd_pvt.h"
 
-#define NRF_CMD_USBTEST         0xa1
-#define NRF_CMD_REBOOT          0xa2
-#define NRF_CMD_IQCAPTURE_TRIG  0xca
-#define NRF_CMD_IQCAPTURE_NOW   0xcb
-#define NRF_CMD_RADIO_STOP      0xcf
-#define NRF_CMD_PEEK32          0xd1
-#define NRF_CMD_POKE32          0xd2
+// #define DEBUG_USB
 
-#define TRIG_TIMER              NRF_TIMER2
-#define TRIG_TIMER_IRQn         TIMER2_IRQn
-#define TRIG_GPIOTE_CHAN        2
-#define TRIG_PPI_CHAN           2
+#define NRF_USB_EP_IN_BULK       0x81 
+#define NRF_USB_EP_IN_ISO        0x88 // for the USB DMA feed, keep those in line with src/usb_descriptors.c and the python scripts
 
-#define LED     (1 << 15) // the red led on the nice!nano
-#define MAXSAMP (16*1024)
+#define NRF_CMD_USBTEST          0xa1
+#define NRF_CMD_REBOOT           0xa2
+#define NRF_CMD_IQCAPTURE_TRIG   0xca
+#define NRF_CMD_IQCAPTURE_NOW    0xcb
+#define NRF_CMD_IQCAPTURE_STREAM 0xcc
+#define NRF_CMD_RADIO_STOP       0xcf
+#define NRF_CMD_PEEK32           0xd1
+#define NRF_CMD_POKE32           0xd2
+
+#define TRIG_TIMER               NRF_TIMER2
+#define TRIG_TIMER_IRQn          TIMER2_IRQn
+#define TRIG_GPIOTE_CHAN         2
+#define TRIG_PPI_CHAN            2
+
+#define LED                      (1 << 15) // the red led on the nice!nano
+#define MAXSAMP                  (48*1024)
 __attribute__((aligned(8192))) static uint32_t iq_buf[MAXSAMP];
+__attribute__((aligned(8192))) static uint32_t usb_ring_buf[4][240];
 
 static volatile int gs_usb_cmd;
+static volatile int gs_streaming;
 static volatile uint8_t gs_usb_buf[64];
 
 void main_loop(void);
@@ -227,13 +236,16 @@ void tud_vendor_rx_cb(uint8_t intf, const uint8_t *buffer, uint32_t bufsize) {
             gs_usb_cmd = buf[0];
             if (bytes_read > 1) {
                 memcpy((void*)gs_usb_buf, buf, bytes_read);
+                if(gs_streaming && gs_usb_cmd != NRF_CMD_IQCAPTURE_STREAM) {
+                    // have to do this here, because the usb cmd handler is not serviced during streaming mode
+                    gs_streaming = 0;
+                }
             }
         }
     }
 }
 
-void arm_capture(int freq, int delay_ticks) {
-
+void prepare_capture(int freq) {
     init_radio(/*access address*/0, freq);
 
     nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
@@ -244,46 +256,40 @@ void arm_capture(int freq, int delay_ticks) {
 
     radio_wait_for_state(NRF_RADIO_STATE_RX);
     delay_us(10);
+}
 
+void arm_capture(int freq, int delay_ticks) {
+    prepare_capture(freq);
     set_trigger(delay_ticks);
 }
 
 void iq_capture(int freq) {
-    init_radio(/*access address*/0, freq);
-
-    nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
-    nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
-
-    radio_set_iq_capture(iq_buf, MAXSAMP);
-    radio_start_rx();
-
-    radio_wait_for_state(NRF_RADIO_STATE_RX);
-    delay_us(10);
-
+    prepare_capture(freq);
     // Trigger IQ capture immediately
     radio_trigger_iq_capture();
 }
 
 void bulk_send(uint8_t *buf, int num_bytes) {
-    uint32_t total_bytes = num_bytes;
     uint32_t bytes_sent = 0;
-    uint8_t* ptr = (uint8_t*)buf;
+    uint8_t* ptr = buf;
+    uint32_t timeout_start = DWT->CYCCNT;
 
-    while ((bytes_sent < total_bytes) && tud_vendor_mounted()) {
-        // Calculate remaining bytes, but cap the request to 1024 bytes
-        uint32_t chunk = total_bytes - bytes_sent;
-        if (chunk > 1024) {
-            chunk = 1024;
+    while ((bytes_sent < num_bytes) && tud_vendor_mounted()) {
+        uint32_t chunk = num_bytes - bytes_sent;
+        if (chunk > 1024) chunk = 1024;
+
+        // Wait until BULK endpoint is free
+        while (tud_vendor_mounted() && usbd_edpt_busy(0, NRF_USB_EP_IN_BULK)) {
+            tud_task();
+            if ((DWT->CYCCNT - timeout_start) > 64000000) return; // 1s safety timeout
         }
 
-        uint32_t pushed = tud_vendor_write(ptr, chunk);
-        if (pushed > 0) {
-            ptr += pushed;
-            bytes_sent += pushed;
-            tud_vendor_write_flush(); // Tell TinyUSB the data is ready to go
+        // Send via Bulk (100% lossless, no padding required)
+        if (usbd_edpt_xfer(0, NRF_USB_EP_IN_BULK, ptr, chunk, false)) {
+            ptr += chunk;
+            bytes_sent += chunk;
+            timeout_start = DWT->CYCCNT; 
         }
-
-        // Keep the USB state machine moving
         tud_task();
     }
 }
@@ -308,10 +314,166 @@ void send_iq_samples(uint32_t *buf, int nsamp) {
     bulk_send((uint8_t*)buf, nsamp * sizeof(uint32_t));
 }
 
+// 1. Extract using MUL
+#define ASM_EXTRACT_1(ACC) \
+    "ldr.w %[rVal], [%[p]], #32 \n"        /* Load every 8th sample */ \
+    "sbfx %[rI], %[rVal], #0, #12 \n"      /* Extract I (sign extended) */ \
+    "sbfx %[rQ], %[rVal], #12, #12 \n"     /* Extract Q (sign extended) */ \
+    "mul %[rT1], %[rI], %[rI] \n"          /* rT1 = I^2 */ \
+    "mul %[rT2], %[rQ], %[rQ] \n"          /* rT2 = Q^2 */ \
+    "cmp %[rT1], %[rT2] \n"                /* Compare. Carry=1 if I^2 >= Q^2 */ \
+    "ubfx %[rT1], %[rVal], #23, #1 \n"     /* Extract Qs */ \
+    "ubfx %[rT2], %[rVal], #11, #1 \n"     /* Extract Is */ \
+    "eor %[rI], %[rT1], %[rT2] \n"         /* b1 = Qs ^ Is */ \
+    "adc %[rQ], %[rZ], %[rZ] \n"           /* rQ = C */ \
+    "eor %[rQ], %[rI], %[rQ] \n"           /* b0_inv = b1 ^ C */ \
+    "eor %[rQ], %[rQ], #1 \n"              /* b0 = b0_inv ^ 1 */ \
+    "orr %[rQ], %[rQ], %[rI], lsl #1 \n"   /* rQ = b0 | (b1 << 1) */ \
+    "orr %[rQ], %[rQ], %[rT1], lsl #2 \n"  /* rQ = b0 | (b1<<1) | (Qs<<2) */ \
+    "lsr " ACC ", " ACC ", #3 \n"          /* Shift accumulator */ \
+    "orr " ACC ", " ACC ", %[rQ], lsl #21 \n"
+
+// 2. Multipliers
+#define ASM_EXTRACT_4(ACC) ASM_EXTRACT_1(ACC) ASM_EXTRACT_1(ACC) ASM_EXTRACT_1(ACC) ASM_EXTRACT_1(ACC)
+#define ASM_EXTRACT_8(ACC) ASM_EXTRACT_4(ACC) ASM_EXTRACT_4(ACC)
+
+// 3. Process 32 Samples (Generates four 24-bit chunks and packs them into THREE 32-bit words)
+#define ASM_PROCESS_32 \
+    "mov %[AccA], #0 \n" \
+    ASM_EXTRACT_8("%[AccA]")                                /* Chunk 0 */ \
+    "mov %[AccB], #0 \n" \
+    ASM_EXTRACT_8("%[AccB]")                                /* Chunk 1 */ \
+    "orr %[rVal], %[AccA], %[AccB], lsl #24 \n"             /* Word 0: All of C0, lower 8 bits of C1 */ \
+    "str %[rVal], [%[out_buf]], #4 \n" \
+    "lsr %[AccA], %[AccB], #8 \n"                           /* Save remaining 16 bits of C1 to AccA */ \
+    "mov %[AccB], #0 \n" \
+    ASM_EXTRACT_8("%[AccB]")                                /* Chunk 2 */ \
+    "orr %[rVal], %[AccA], %[AccB], lsl #16 \n"             /* Word 1: Upper 16 of C1, lower 16 of C2 */ \
+    "str %[rVal], [%[out_buf]], #4 \n" \
+    "lsr %[AccA], %[AccB], #16 \n"                          /* Save remaining 8 bits of C2 to AccA */ \
+    "mov %[AccB], #0 \n" \
+    ASM_EXTRACT_8("%[AccB]")                                /* Chunk 3 */ \
+    "orr %[rVal], %[AccA], %[AccB], lsl #8 \n"              /* Word 2: Upper 8 of C2, all of C3 */ \
+    "str %[rVal], [%[out_buf]], #4 \n"
+
+// 4. The Wrapper Function
+// NOTE: __attribute__((noinline)) is critical to prevent I-Cache thrashing.
+__attribute__((noinline, optimize("no-unroll-loops")))
+void process_and_push_frame(const uint32_t* stream_buf, uint32_t* out_buf) {
+    uint32_t AccA, AccB, rVal, rI, rQ, rT1, rT2;
+    const uint32_t* p = stream_buf;
+    uint32_t rZ = 0;
+    
+    uint32_t* out = out_buf;
+
+#ifdef DEBUG_USB
+    uint32_t timestamps[16];
+#endif
+
+    // Generate exactly 960 bytes of pure samples linearly.
+    // 80 blocks * 12 bytes = 960 bytes.
+    for (int j = 0; j < 16; j++) {
+        for (int i = 0; i < 5; i++) {
+            __asm__ volatile ( 
+                ASM_PROCESS_32 
+                :[AccA]"=&r"(AccA), [AccB]"=&r"(AccB),[rVal]"=&r"(rVal),[rI]"=&r"(rI),[rQ]"=&r"(rQ),[rT1]"=&r"(rT1),[rT2]"=&r"(rT2),[p]"+r"(p),[out_buf]"+r"(out) 
+                :[rZ]"r"(rZ) 
+                :"cc", "memory" 
+            );
+        }
+
+#ifdef DEBUG_USB
+        // Snapshot the timer AFTER every 60 bytes generated
+        timestamps[j] = DWT->CYCCNT >> 6;
+#endif
+
+    }
+
+#ifdef DEBUG_USB
+    // Overwrite the first 4 bytes of every 64-byte chunk (15 chunks total)
+    for (int b = 0; b < 15; b++) {
+        uint32_t sync_word = (b == 0) ? 0x55BB : 0x55AA;
+        out_buf[b * 16] = ((timestamps[b] & 0xFFFF) << 16) | sync_word;
+    }
+#endif
+}
+
+void iqcapture_stream(int freq) {
+    init_radio(0, freq);
+    radio_start_rx();
+    while (nrf_radio_state_get(NRF_RADIO) != NRF_RADIO_STATE_RX) { tud_task(); }
+
+    nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
+    nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
+
+    // 20,480 samples perfectly produces 960 bytes of pure 3-bit samples (1.28ms pacing)
+    int streambuf_size = 20480; 
+    uint32_t *capture_buf = iq_buf;
+    uint32_t *process_buf = NULL;
+    
+    int write_idx = 0;
+    int read_idx = 0;
+
+    radio_set_iq_capture(capture_buf, streambuf_size);
+    radio_trigger_iq_capture();
+    uint32_t start_capture = DWT->CYCCNT;
+
+    while(gs_streaming) {
+
+        // Radio captures at 1.28ms
+        if (nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND)) {
+            nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
+
+            // Swap buffers and instantly re-trigger capture to maintain 0-gap continuity
+            process_buf = capture_buf;
+            capture_buf = (capture_buf == iq_buf) ? &iq_buf[streambuf_size] : iq_buf;
+            radio_set_iq_capture(capture_buf, streambuf_size);
+            radio_trigger_iq_capture();
+            start_capture = DWT->CYCCNT;
+
+            // Process directly into the ring buffer
+            process_and_push_frame(process_buf, usb_ring_buf[write_idx]);
+            write_idx = (write_idx + 1) & 3; // Advance modulo 4
+        }
+
+        // keep USB endpoint primed (1.00ms)
+        if (tud_vendor_mounted() && !usbd_edpt_busy(0, NRF_USB_EP_IN_ISO)) {
+            if (read_idx != write_idx) {
+                // Buffer has data, Queue the 960 bytes.
+                usbd_edpt_xfer(0, NRF_USB_EP_IN_ISO, (uint8_t*)usb_ring_buf[read_idx], 960, false);
+                read_idx = (read_idx + 1) & 3; // Advance modulo 4
+            }
+            else {
+                // send full dummy frame to keep the flow going
+                int last_idx = (read_idx + 3) & 3;
+                usb_ring_buf[last_idx][0] = (usb_ring_buf[last_idx][0] & 0xFFFF0000) | 0x55DD;
+                usbd_edpt_xfer(0, NRF_USB_EP_IN_ISO, (uint8_t*)usb_ring_buf[last_idx], 960, false);
+            }
+        }
+
+        // lower priority tasks, stop these when the IQ capture is about to end
+        // 1600 cycles is 25us
+        if((DWT->CYCCNT - start_capture) < (81920 - 1600)) {
+            tud_task();
+
+            if (gs_usb_cmd == NRF_CMD_RADIO_STOP) { 
+                gs_streaming = 0; 
+                gs_usb_cmd = 0; 
+                break; 
+            }
+        }
+    }
+    
+    radio_stop();
+}
+
 void usb_cmd_handler() {
     int freq, delay_ticks;
     if(gs_usb_cmd) {
-        switch(gs_usb_cmd) {
+        int cmd = gs_usb_cmd;
+        gs_usb_cmd = 0; 
+
+        switch(cmd) {
         case NRF_CMD_REBOOT:
             blink(3);
             jump_bootloader();
@@ -329,7 +491,13 @@ void usb_cmd_handler() {
             iq_capture(freq);
             blink(1);
             break;
+        case NRF_CMD_IQCAPTURE_STREAM:
+            freq = 2400 + gs_usb_buf[1];
+            gs_streaming = 1;
+            iqcapture_stream(freq);
+            break;
         case NRF_CMD_RADIO_STOP:
+            gs_streaming = 0;
             radio_stop();
             blink(1);
             break;
@@ -363,7 +531,6 @@ void usb_cmd_handler() {
             blink(1);
             break;            
         }
-        gs_usb_cmd = 0;
     }
 }
 
@@ -379,6 +546,9 @@ void capture_handler() {
 void main(void) {
     // Relocate the interrupt vector table to the app start address for UF2
     SCB->VTOR = 0x26000;
+
+    // enable Instruction Cache
+    NRF_NVMC->ICACHECNF = NVMC_ICACHECNF_CACHEEN_Enabled;
 
     clock_init();
     delay_init();

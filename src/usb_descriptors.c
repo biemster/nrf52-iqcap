@@ -41,20 +41,24 @@ enum {
 // Endpoint addresses
 // 0x01 is OUT from Host to Device
 // 0x81 is IN from Device to Host (Your IQ Data)
-#define EPNUM_VENDOR_OUT  0x01
-#define EPNUM_VENDOR_IN   0x81
+#define EPNUM_VENDOR_OUT      0x01
+#define EPNUM_VENDOR_IN_BULK  0x81
+#define EPNUM_VENDOR_IN_ISO   0x88
 
 // Total length of the configuration descriptor payload
-#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_VENDOR_DESC_LEN)
+#define TUD_VENDOR_DUAL_IN_DESC_LEN  (9 + 7 + 7 + 7)
+#define CONFIG_TOTAL_LEN             (TUD_CONFIG_DESC_LEN + TUD_VENDOR_DUAL_IN_DESC_LEN)
 
-// Helper macro to build the Vendor descriptor
-#define TUD_VENDOR_DESCRIPTOR(_itfnum, _stridx, _epout, _epin, _epsize) \
-  /* Interface Descriptor */\
-  9, TUSB_DESC_INTERFACE, _itfnum, 0, 2, TUSB_CLASS_VENDOR_SPECIFIC, 0x00, 0x00, _stridx,\
-  /* Endpoint Out Descriptor */\
-  7, TUSB_DESC_ENDPOINT, _epout, TUSB_XFER_BULK, U16_TO_U8S_LE(_epsize), 0,\
-  /* Endpoint In Descriptor */\
-  7, TUSB_DESC_ENDPOINT, _epin, TUSB_XFER_BULK, U16_TO_U8S_LE(_epsize), 0
+// Custom Vendor Interface with 1 Bulk OUT, 1 Bulk IN, and 1 Isochronous IN
+#define TUD_VENDOR_DUAL_IN_DESCRIPTOR(_itfnum, _stridx, _epout, _epin_bulk, _epin_iso, _epsize) \
+  /* Interface Descriptor (bNumEndpoints = 3) */ \
+  9, TUSB_DESC_INTERFACE, _itfnum, 0, 3, TUSB_CLASS_VENDOR_SPECIFIC, 0x00, 0x00, _stridx, \
+  /* Endpoint Out (Bulk, 64 bytes) */ \
+  7, TUSB_DESC_ENDPOINT, _epout, TUSB_XFER_BULK, U16_TO_U8S_LE(64), 0, \
+  /* Endpoint In (Bulk, 64 bytes) -> Used for Burst & Peek */ \
+  7, TUSB_DESC_ENDPOINT, _epin_bulk, TUSB_XFER_BULK, U16_TO_U8S_LE(64), 0, \
+  /* Endpoint In (Isochronous, 1ms) -> Used for continuous streaming */ \
+  7, TUSB_DESC_ENDPOINT, _epin_iso, TUSB_XFER_ISOCHRONOUS, U16_TO_U8S_LE(_epsize), 1
 
 uint8_t const desc_configuration[] =
 {
@@ -62,8 +66,7 @@ uint8_t const desc_configuration[] =
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
 
     // Vendor Interface Descriptor
-    // Interface number, string index, EP Out & EP In address, EP size
-    TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 0, EPNUM_VENDOR_OUT, EPNUM_VENDOR_IN, CFG_TUD_VENDOR_EPSIZE)
+    TUD_VENDOR_DUAL_IN_DESCRIPTOR(0, 0, EPNUM_VENDOR_OUT, EPNUM_VENDOR_IN_BULK, EPNUM_VENDOR_IN_ISO, 960)
 };
 
 // Invoked when GET CONFIGURATION DESCRIPTOR is received

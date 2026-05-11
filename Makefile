@@ -3,6 +3,7 @@ TARGET = nrf52_iqcap
 COMPILER_PREFIX = arm-none-eabi-
 CC = $(COMPILER_PREFIX)gcc
 OBJCOPY = $(COMPILER_PREFIX)objcopy
+OBJDUMP = $(COMPILER_PREFIX)objdump
 AR = $(COMPILER_PREFIX)ar
 SIZE = $(COMPILER_PREFIX)size
 UF2 = uf2conv
@@ -39,7 +40,7 @@ CFLAGS += -O0
 else
 # -DNDEBUG disables asserts which usually isn't what we want
 #CFLAGS += -DNDEBUG
-CFLAGS += -Os
+CFLAGS += -O3
 CFLAGS += -flto
 endif
 
@@ -48,7 +49,7 @@ CFLAGS += -DNRF52840_XXAA
 CFLAGS += -mthumb
 CFLAGS += -mcpu=cortex-m4
 CFLAGS += -mfpu=fpv4-sp-d16
-CFLAGS += -mfloat-abi=softfp
+CFLAGS += -mfloat-abi=hard
 CFLAGS += -std=c99
 CFLAGS += -Wall -Wno-format
 CFLAGS += -fno-common
@@ -72,12 +73,12 @@ LDFLAGS += -Wl,-z -Wl,muldefs
 LDFLAGS += -Wl,--start-group $(patsubst %,-l%,$(LIB)) -Wl,--end-group
 
 .PHONY: all flash
-all: build size uf2
+all: build list size uf2
 
 flash: all
 	python usb_ctrl.py -b
 	sleep 3
-	udisksctl mount -b /dev/sd? && cp nrf52_iqcap.uf2 /run/media/*/NICENANO
+	udisksctl mount -b /dev/sd? && cp $(TARGET).uf2 /run/media/*/NICENANO
 
 .PHONY: build
 build: $(TARGET).elf
@@ -88,6 +89,10 @@ uf2: $(TARGET).uf2
 .PHONY: size
 size: $(TARGET).elf
 	$(SIZE) $<
+
+.PHONY: list
+list: $(TARGET).elf
+	$(OBJDUMP) -S $< > $(TARGET).lst
 
 .PHONY: tags
 tags:

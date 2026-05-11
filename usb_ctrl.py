@@ -16,23 +16,25 @@ except ImportError:
 
 NRF_USB_EP_IN        = 0x81      # endpoint for data transfer in
 NRF_USB_EP_OUT       = 0x01      # endpoint for command transfer out
-NRF_USB_PACKET_SIZE  = 14*1024*4 # packet size
+NRF_USB_PACKET_SIZE  = 32*1024*4 # packet size
 NRF_USB_TIMEOUT_MS   = 100       # timeout for normal USB operations
 
-NRF_CMD_USBTEST     = 0xa1
-NRF_CMD_REBOOT      = 0xa2
-NRF_CMD_IQCAP_TRIG  = 0xca
-NRF_CMD_IQCAP_NOW   = 0xcb
-NRF_CMD_RADIO_STOP  = 0xcf
-NRF_CMD_PEEK32      = 0xd1
-NRF_CMD_POKE32      = 0xd2
-NRF_STR_USBTEST     = (NRF_CMD_USBTEST, 0x01, 0x00, 0x01)
-NRF_STR_REBOOT      = (NRF_CMD_REBOOT, 0x01, 0x00, 0x01)
-NRF_STR_IQCAP_TRIG  = (NRF_CMD_IQCAP_TRIG, 0x00, 0x00, 0x01)
-NRF_STR_IQCAP_NOW   = (NRF_CMD_IQCAP_NOW, 0x00, 0x00, 0x01)
-NRF_STR_RADIO_STOP  = (NRF_CMD_RADIO_STOP, 0x00, 0x00, 0x00)
-NRF_STR_PEEK32      = (NRF_CMD_PEEK32, 0x00, 0x00, 0x00, 0, 0, 0, 0)
-NRF_STR_POKE32      = (NRF_CMD_POKE32, 0x00, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0)
+NRF_CMD_USBTEST      = 0xa1
+NRF_CMD_REBOOT       = 0xa2
+NRF_CMD_IQCAP_TRIG   = 0xca
+NRF_CMD_IQCAP_NOW    = 0xcb
+NRF_CMD_IQCAP_STREAM = 0xcc
+NRF_CMD_RADIO_STOP   = 0xcf
+NRF_CMD_PEEK32       = 0xd1
+NRF_CMD_POKE32       = 0xd2
+NRF_STR_USBTEST      = (NRF_CMD_USBTEST, 0x01, 0x00, 0x01)
+NRF_STR_REBOOT       = (NRF_CMD_REBOOT, 0x01, 0x00, 0x01)
+NRF_STR_IQCAP_TRIG   = (NRF_CMD_IQCAP_TRIG, 0x00, 0x00, 0x01)
+NRF_STR_IQCAP_NOW    = (NRF_CMD_IQCAP_NOW, 0x00, 0x00, 0x01)
+NRF_STR_IQCAP_STREAM = (NRF_CMD_IQCAP_STREAM, 0x00, 0x00, 0x01)
+NRF_STR_RADIO_STOP   = (NRF_CMD_RADIO_STOP, 0x00, 0x00, 0x00)
+NRF_STR_PEEK32       = (NRF_CMD_PEEK32, 0x00, 0x00, 0x00, 0, 0, 0, 0)
+NRF_STR_POKE32       = (NRF_CMD_POKE32, 0x00, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 0)
 
 
 BLE_FREQUENCIES = [
@@ -77,7 +79,7 @@ class USBDevice:
             raise RuntimeError("USB device not found")
         return self.dev.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, timeout=timeout)
 
-    def read_stream(self, expect_trigger=False):
+    def read_stream(self, expect_trigger=False, is_streaming=False):
         raw_data = bytearray()
         while True:
             try:
@@ -86,6 +88,11 @@ class USBDevice:
             except usb.core.USBError:
                 if len(raw_data) == 0 and expect_trigger:
                     continue
+                break
+            except KeyboardInterrupt:
+                if is_streaming:
+                    print(f'Stopping stream')
+                    self.write(NRF_STR_RADIO_STOP)
                 break
         return raw_data
     
@@ -110,9 +117,11 @@ class USBDevice:
         cmd[8:12] = value.to_bytes(4, 'big')
         self.write(cmd)
 
-    def send_iqcap(self, freq, trigger=False, delay=None):
+    def send_iqcap(self, freq, trigger=False, streaming=False, delay=None):
         if trigger:
             cmd = bytearray(NRF_STR_IQCAP_TRIG)
+        elif streaming:
+            cmd = bytearray(NRF_STR_IQCAP_STREAM)
         else:
             cmd = bytearray(NRF_STR_IQCAP_NOW)
         cmd[1] = int(freq) - 2400
@@ -124,7 +133,7 @@ class USBDevice:
             cmd[2] = 0
             cmd[3] = 1
         self.write(cmd)
-        return self.read_stream(expect_trigger=trigger)
+        return self.read_stream(expect_trigger=trigger, is_streaming=streaming)
 
 def launch_gui(device, args):
     if not GUI_AVAILABLE:
@@ -171,7 +180,7 @@ def launch_gui(device, args):
     def on_capture():
         # Get selected frequency
         idx = combo.current()
-        freq = BLE_FREQUENCIES[idx]
+        freq = BLE_FREQUENCIES[idx] +1 # radio tunes 1MHz lower than requested
 
         device.clear_pipes()
 
@@ -223,6 +232,7 @@ def main():
     parser.add_argument('-c', '--channel', help='start IQ capture on BLE channel')
     parser.add_argument('-f', '--frequency', help='start IQ capture on frequency (MHz)')
     parser.add_argument('-d', '--delay', help='delay after trigger before starting capture (us)')
+    parser.add_argument('-s', '--streaming', help='Stream 1bit IQ at 2Msps continuously', action='store_true')
     parser.add_argument('-t', '--trigger', help='Wait for GPIO trigger', action='store_true')
     parser.add_argument('-u', '--usbtest', help='Send test command over USB to blink the LED', action='store_true')
     parser.add_argument('--peek', help='Peek 32-bit value from address', type=lambda x: int(x, base=0))
@@ -264,16 +274,19 @@ def main():
         # device.usb_test()
     elif args.channel or args.frequency:
         if args.channel:
-            freq = BLE_FREQUENCIES[int(args.channel)]
+            freq = BLE_FREQUENCIES[int(args.channel)] +1 # radio tunes 1MHz lower than requested
             print(f'Starting capture on channel {args.channel} ({freq} MHz)')
         elif args.frequency:
             freq = int(args.frequency)
             print(f'Starting capture on {freq} MHz')
         
-        data = device.send_iqcap(freq, trigger=args.trigger, delay=args.delay)
-        with open('capture.raw', 'wb') as f:
+        data = device.send_iqcap(freq, trigger=args.trigger, streaming=args.streaming, delay=args.delay)
+        with open('capture_1bit.raw' if args.streaming else 'capture.raw', 'wb') as f:
             f.write(data)
-        print(f'{len(data) // 4} samples written to {f.name}')
+            if args.streaming:
+                print(f'{len(data) * 4} 1bit IQ samples written to {f.name}')
+            else:
+                print(f'{len(data) // 4} samples written to {f.name}')
 
 if __name__ == '__main__':
     main()

@@ -31,6 +31,13 @@ $ python const_plot.py
 This will capture on 2402 MHz BLE channel 37 (`-c 37`) starting 100 us (`-d 100`) after a falling edge trigger (`-t`). 
 The `const_plot.py` script will show a constellation plot of the captured data.
 
+#### Streaming mode
+
+There is experimental support for a continuous streaming mode, where the 12 bit 16Msps samples are decimated
+to 3 bit angles at 2Msps, to fit in the USB data rate budget at about 750 kB/s.
+Two test script are included in the `tests/` directory, and a GNURadio source block is in development
+(and the possibility of extending the 3 bit angle to 4 bits, turning it into more regular 2 bit IQ samples).
+
 ## Credits
 
 - *[@iracigt](https://github.com/iracigt)* nRF52840 reverse engineering 
