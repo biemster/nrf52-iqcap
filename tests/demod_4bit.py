@@ -16,7 +16,7 @@ ACCESS_ADDRESS   = 0x8E89BED6 # 0x63683332 # b'ch32'
 
 NRF_USB_EP_IN        = 0x88
 NRF_USB_EP_OUT       = 0x01      
-NRF_USB_PACKET_SIZE  = 960 * 100
+NRF_USB_PACKET_SIZE  = 1000 * 100
 NRF_USB_TIMEOUT_MS   = 2000
 
 NRF_CMD_IQCAP_STREAM = 0xcc
@@ -56,10 +56,11 @@ class USBDevice:
         if not self.found(): raise RuntimeError("USB device not found")
         return self.dev.read(NRF_USB_EP_IN, NRF_USB_PACKET_SIZE, timeout=timeout)
         
-    def start_stream(self, freq):
+    def start_stream(self, freq, is_angles):
         cmd = bytearray(NRF_STR_IQCAP_STREAM)
         cmd[1] = int(freq) - 2400
-        cmd[2], cmd[3] = 0, 1
+        cmd[2] = 1 if is_angles else 0
+        cmd[3] = 1
         self.write(cmd)
         
     def stop_stream(self):
@@ -96,16 +97,16 @@ def usb_reader_thread(device, data_queue, stop_event):
 # ==============================================================================
 # MAIN DEMODULATOR LOGIC
 # ==============================================================================
-def stream_and_demodulate(device, freq, threshold, max_errors, debug_usb):
+def stream_and_demodulate(device, freq, is_angles, threshold, max_errors, debug_usb):
     mode_str = "DEBUG (Sync/Telemetry)" if debug_usb else "RELEASE (Pure IQ Stream)"
-    print(f"\n[+] Starting continuous 3-bit Phase demodulation on {freq} MHz")
+    print(f"\n[+] Starting continuous 4-bit Phase demodulation on {freq} MHz")
     print(f"[+] USB Parsing Mode        : {mode_str}")
     print(f"[+] Look for Access Address : 0x{ACCESS_ADDRESS:08X}")
     print(f"[+] Max Bit Errors Allowed  : {max_errors}/32")
     print("[!] Press Ctrl+C to stop...\n")
     
     device.clear_pipes()
-    device.start_stream(freq)
+    device.start_stream(freq, is_angles)
 
     data_queue = queue.Queue()
     stop_event = threading.Event()
@@ -122,7 +123,7 @@ def stream_and_demodulate(device, freq, threshold, max_errors, debug_usb):
     ideal_waveform = np.repeat(ideal_aa_bits * 2 - 1, sps)
     b_filt, a_filt = signal.butter(6, 555e3 / (2e6 / 2), btype='low')
 
-    angle_buffer = np.array([], dtype=np.int32)
+    angle_buffer = np.array([], dtype=np.float32)
     total_bits_to_extract = (1 + 4 + PAYLOAD_BYTES) * 8
     
     noise_frames_ignored = 0
@@ -133,67 +134,68 @@ def stream_and_demodulate(device, freq, threshold, max_errors, debug_usb):
     SYNC_DUMMY = b'\xDD\x55' 
     SYNC_SUB   = b'\xAA\x55' 
 
-    # Telemetry State (For Debug Mode)
+    # Look-up table for high-speed symmetric 2-bit 2's complement conversion
+    # Maps unsigned bits (00, 01, 10, 11) to perfectly symmetric floats
+    iq_lut = np.array([0.5, 1.5, -1.5, -0.5], dtype=np.float32)
+
     expected_ts = None
     stats_count = 0
     stats_sum = 0.0
     stats_sum_sq = 0.0
-    
-    # Validation State (For Release Mode)
     last_valid_frame = None
 
     try:
         while True:
-            # 1. READ CHUNK (Blocks for ~120ms)
+            # 1. READ CHUNK
             data = device.read_packet(timeout=NRF_USB_TIMEOUT_MS)
             raw_usb_buffer.extend(data)
 
-            # 2. PARSE ALL FRAMES
+            # 2. PARSE ALL FRAMES (1000 byte blocks)
             batch_data_bytes = bytearray()
             
-            while len(raw_usb_buffer) >= 960:
+            while len(raw_usb_buffer) >= 1000:
                 
                 # ==========================================
                 # PATH A: DEBUG FIRMWARE (Hunts for sync)
                 # ==========================================
                 if debug_usb:
                     b0 = raw_usb_buffer[0:2]
-                    b1 = raw_usb_buffer[64:66]
+                    b1 = raw_usb_buffer[100:102]
 
                     is_valid = (b0 == SYNC_MAIN and b1 == SYNC_SUB)
                     is_dummy = (b0 == SYNC_DUMMY and b1 == SYNC_SUB)
 
                     if not (is_valid or is_dummy):
                         idx = -1
-                        for i in range(1, len(raw_usb_buffer) - 65):
+                        for i in range(1, len(raw_usb_buffer) - 101):
                             s0 = raw_usb_buffer[i:i+2]
-                            s1 = raw_usb_buffer[i+64:i+66]
+                            s1 = raw_usb_buffer[i+100:i+102]
                             if (s0 == SYNC_MAIN or s0 == SYNC_DUMMY) and s1 == SYNC_SUB:
                                 idx = i
                                 break
                         
                         if idx == -1:
-                            raw_usb_buffer = raw_usb_buffer[-128:]
+                            raw_usb_buffer = raw_usb_buffer[-200:]
                             break
                             
                         sys.stdout.write(f"\r\033[K[!] Skipped {idx} bytes of garbage to re-sync\n")
                         raw_usb_buffer = raw_usb_buffer[idx:]
-                        if len(raw_usb_buffer) < 960:
+                        if len(raw_usb_buffer) < 1000:
                             break 
                         
                         is_dummy = (raw_usb_buffer[0:2] == SYNC_DUMMY)
 
-                    frame = raw_usb_buffer[:960]
-                    del raw_usb_buffer[:960] 
+                    frame = raw_usb_buffer[:1000]
+                    del raw_usb_buffer[:1000] 
                     
                     if is_dummy:
                         continue
                     
                     timestamps =[]
-                    for b in range(15):
-                        header = int.from_bytes(frame[b*64 : b*64+4], byteorder='little')
+                    for b in range(10):
+                        header = int.from_bytes(frame[b*100 : b*100+4], byteorder='little')
                         timestamps.append((header >> 16) & 0xFFFF)
-                        batch_data_bytes.extend(frame[b*64+4 : (b+1)*64])
+                        batch_data_bytes.extend(frame[b*100+4 : (b+1)*100])
                     
                     ts_us = timestamps[0]
                     if expected_ts is not None:
@@ -205,7 +207,7 @@ def stream_and_demodulate(device, freq, threshold, max_errors, debug_usb):
                             stats_sum_sq += delta_us * delta_us
                         
                         if delta_us > 1800:
-                            missed = round(delta_us / 1280.0) - 1
+                            missed = round(delta_us / 1000.0) - 1
                             sys.stdout.write(f"\n[!] 🔴 DROP DETECTED: Gap of {delta_us} µs (~{missed} frames lost)\n")
                             sys.stdout.flush()
                             
@@ -213,7 +215,7 @@ def stream_and_demodulate(device, freq, threshold, max_errors, debug_usb):
 
                     if stats_count > 1:
                         avg_d = stats_sum / stats_count
-                        internal_deltas = [(timestamps[i] - timestamps[i-1]) & 0xFFFF for i in range(1, 15)]
+                        internal_deltas = [(timestamps[i] - timestamps[i-1]) & 0xFFFF for i in range(1, 10)]
                         avg_exec = sum(internal_deltas) / len(internal_deltas)
                         max_exec = max(internal_deltas)
                         
@@ -221,38 +223,48 @@ def stream_and_demodulate(device, freq, threshold, max_errors, debug_usb):
                         sys.stdout.flush()
 
                 # ==========================================
-                # PATH B: RELEASE FIRMWARE (Pure 960 bytes)
+                # PATH B: RELEASE FIRMWARE (Pure 1000 bytes)
                 # ==========================================
                 else:
-                    frame = raw_usb_buffer[:960]
-                    del raw_usb_buffer[:960]
+                    frame = raw_usb_buffer[:1000]
+                    del raw_usb_buffer[:1000]
                     
-                    # Detect Dummy Padding Frames via Exact Content Matching.
-                    # We skip the first 4 bytes because the firmware modifies the first 2 bytes 
-                    # to 0x55DD on dummy frames. The rest of the buffer will perfectly match.
                     if last_valid_frame is not None and frame[4:] == last_valid_frame[4:]:
                         continue
                         
                     last_valid_frame = frame
                     batch_data_bytes.extend(frame)
 
-
-            # --- RUN VECTORIZED NUMPY MATH ONCE PER BATCH ---
+            # --- VECTORIZED NUMPY 4-BIT EXTRACTION ---
             if batch_data_bytes:
-                try:
-                    bits = np.unpackbits(np.frombuffer(batch_data_bytes, dtype=np.uint8), bitorder='little')
-                except TypeError:
-                    bits = np.unpackbits(np.frombuffer(batch_data_bytes, dtype=np.uint8)).reshape(-1, 8)[:, ::-1].flatten()
-                
-                sample_bits = bits.reshape(-1, 3)
-                new_angles = sample_bits[:, 0] + (sample_bits[:, 1] << 1) + (sample_bits[:, 2] << 2)
-                
-                angle_buffer = np.concatenate((angle_buffer, new_angles.astype(np.int32)))
+                raw_bytes = np.frombuffer(batch_data_bytes, dtype=np.uint8)
+                nibbles = np.empty(len(raw_bytes)*2, dtype=np.uint8)
+                nibbles[0::2] = raw_bytes & 0x0F
+                nibbles[1::2] = raw_bytes >> 4
+
+                if is_angles:
+                    # Scale directly to Radians (-pi to pi)
+                    new_angles = (nibbles.astype(np.float32) / 16.0) * (2 * np.pi) - np.pi
+                else:
+                    I_val = nibbles & 0x03
+                    Q_val = nibbles >> 2
+    
+                    # Fast Look-up to convert unsigned to 2's comp signed floats
+                    I_signed = iq_lut[I_val]
+                    Q_signed = iq_lut[Q_val]
+    
+                    new_angles = np.arctan2(Q_signed, I_signed)
+                angle_buffer = np.concatenate((angle_buffer, new_angles))
 
 
             # 3. RUN DSP ON THE WHOLE BUFFER ONCE
             if len(angle_buffer) >= 10000:
-                fm_demod = (angle_buffer[1:] - angle_buffer[:-1] + 4) % 8 - 4
+                # Phase unwrap via difference and modulo pi map
+                fm_demod = angle_buffer[1:] - angle_buffer[:-1]
+                fm_demod = (fm_demod + np.pi) % (2 * np.pi) - np.pi
+                
+                # Scale phase diff (radians) by (4 / pi) to perfectly match your old 3-bit threshold limits (-4 to +4 mag)
+                fm_demod *= (4.0 / np.pi) 
 
                 fm_filtered = signal.lfilter(b_filt, a_filt, fm_demod)
 
@@ -319,6 +331,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--channel', help='Start on BLE channel index (0-39)')
     parser.add_argument('-f', '--frequency', help='Start on frequency (MHz)')
+    parser.add_argument('-a', '--angles', action='store_true', help='Stream 4 bit angles instead of IQ samples')
     parser.add_argument('-t', '--threshold', help='Correlation threshold (0.0 to 1.0)', type=float, default=0.40)
     parser.add_argument('-e', '--errors', help='Max Bit errors allowed in AA', type=int, default=2)
     parser.add_argument('-d', '--debug-usb', action='store_true', help='Analyze USB frame drops and MCU timings')
@@ -336,7 +349,7 @@ def main():
     else:
         freq = BLE_FREQUENCIES[37] + 1
 
-    stream_and_demodulate(device, freq, args.threshold, args.errors, args.debug_usb)
+    stream_and_demodulate(device, freq, args.angles, args.threshold, args.errors, args.debug_usb)
 
 if __name__ == '__main__':
     main()

@@ -30,10 +30,11 @@
 #define LED                      (1 << 15) // the red led on the nice!nano
 #define MAXSAMP                  (48*1024)
 __attribute__((aligned(8192))) static uint32_t iq_buf[MAXSAMP];
-__attribute__((aligned(8192))) static uint32_t usb_ring_buf[4][240];
+__attribute__((aligned(8192))) static uint32_t usb_ring_buf[4][250]; // 250 words = 1000 bytes
 
 static volatile int gs_usb_cmd;
 static volatile int gs_streaming;
+static volatile int gs_streaming_angle;
 static volatile uint8_t gs_usb_buf[64];
 
 void main_loop(void);
@@ -314,86 +315,97 @@ void send_iq_samples(uint32_t *buf, int nsamp) {
     bulk_send((uint8_t*)buf, nsamp * sizeof(uint32_t));
 }
 
-// 1. Extract using MUL
-#define ASM_EXTRACT_1(ACC) \
-    "ldr.w %[rVal], [%[p]], #32 \n"        /* Load every 8th sample */ \
-    "sbfx %[rI], %[rVal], #0, #12 \n"      /* Extract I (sign extended) */ \
-    "sbfx %[rQ], %[rVal], #12, #12 \n"     /* Extract Q (sign extended) */ \
-    "mul %[rT1], %[rI], %[rI] \n"          /* rT1 = I^2 */ \
-    "mul %[rT2], %[rQ], %[rQ] \n"          /* rT2 = Q^2 */ \
-    "cmp %[rT1], %[rT2] \n"                /* Compare. Carry=1 if I^2 >= Q^2 */ \
-    "ubfx %[rT1], %[rVal], #23, #1 \n"     /* Extract Qs */ \
-    "ubfx %[rT2], %[rVal], #11, #1 \n"     /* Extract Is */ \
-    "eor %[rI], %[rT1], %[rT2] \n"         /* b1 = Qs ^ Is */ \
-    "adc %[rQ], %[rZ], %[rZ] \n"           /* rQ = C */ \
-    "eor %[rQ], %[rI], %[rQ] \n"           /* b0_inv = b1 ^ C */ \
-    "eor %[rQ], %[rQ], #1 \n"              /* b0 = b0_inv ^ 1 */ \
-    "orr %[rQ], %[rQ], %[rI], lsl #1 \n"   /* rQ = b0 | (b1 << 1) */ \
-    "orr %[rQ], %[rQ], %[rT1], lsl #2 \n"  /* rQ = b0 | (b1<<1) | (Qs<<2) */ \
-    "lsr " ACC ", " ACC ", #3 \n"          /* Shift accumulator */ \
-    "orr " ACC ", " ACC ", %[rQ], lsl #21 \n"
+// ==============================================================================
+// ASSEMBLY A: 2-BIT I/Q EXTRACTION
+// ==============================================================================
+#define ASM_EXTRACT_IQ_1(ACC) \
+    "ldr.w %[rVal], [%[p]], #32 \n"        \
+    "ubfx %[rI], %[rVal], #10, #2 \n"      \
+    "ubfx %[rQ], %[rVal], #22, #2 \n"      \
+    "orr %[rI], %[rI], %[rQ], lsl #2 \n"   \
+    "lsr " ACC ", " ACC ", #4 \n"          \
+    "orr " ACC ", " ACC ", %[rI], lsl #28 \n"
 
-// 2. Multipliers
-#define ASM_EXTRACT_4(ACC) ASM_EXTRACT_1(ACC) ASM_EXTRACT_1(ACC) ASM_EXTRACT_1(ACC) ASM_EXTRACT_1(ACC)
-#define ASM_EXTRACT_8(ACC) ASM_EXTRACT_4(ACC) ASM_EXTRACT_4(ACC)
+#define ASM_PROCESS_IQ_8 \
+    "mov %[Acc], #0 \n" \
+    ASM_EXTRACT_IQ_1("%[Acc]") ASM_EXTRACT_IQ_1("%[Acc]") ASM_EXTRACT_IQ_1("%[Acc]") ASM_EXTRACT_IQ_1("%[Acc]") \
+    ASM_EXTRACT_IQ_1("%[Acc]") ASM_EXTRACT_IQ_1("%[Acc]") ASM_EXTRACT_IQ_1("%[Acc]") ASM_EXTRACT_IQ_1("%[Acc]") \
+    "str %[Acc], [%[out_buf]], #4 \n"
 
-// 3. Process 32 Samples (Generates four 24-bit chunks and packs them into THREE 32-bit words)
-#define ASM_PROCESS_32 \
-    "mov %[AccA], #0 \n" \
-    ASM_EXTRACT_8("%[AccA]")                                /* Chunk 0 */ \
-    "mov %[AccB], #0 \n" \
-    ASM_EXTRACT_8("%[AccB]")                                /* Chunk 1 */ \
-    "orr %[rVal], %[AccA], %[AccB], lsl #24 \n"             /* Word 0: All of C0, lower 8 bits of C1 */ \
-    "str %[rVal], [%[out_buf]], #4 \n" \
-    "lsr %[AccA], %[AccB], #8 \n"                           /* Save remaining 16 bits of C1 to AccA */ \
-    "mov %[AccB], #0 \n" \
-    ASM_EXTRACT_8("%[AccB]")                                /* Chunk 2 */ \
-    "orr %[rVal], %[AccA], %[AccB], lsl #16 \n"             /* Word 1: Upper 16 of C1, lower 16 of C2 */ \
-    "str %[rVal], [%[out_buf]], #4 \n" \
-    "lsr %[AccA], %[AccB], #16 \n"                          /* Save remaining 8 bits of C2 to AccA */ \
-    "mov %[AccB], #0 \n" \
-    ASM_EXTRACT_8("%[AccB]")                                /* Chunk 3 */ \
-    "orr %[rVal], %[AccA], %[AccB], lsl #8 \n"              /* Word 2: Upper 8 of C2, all of C3 */ \
-    "str %[rVal], [%[out_buf]], #4 \n"
 
-// 4. The Wrapper Function
-// NOTE: __attribute__((noinline)) is critical to prevent I-Cache thrashing.
+// ==============================================================================
+// ASSEMBLY B: NATIVE 4-BIT ANGLE EXTRACTION (16 SECTORS) - CACHE OPTIMIZED
+// ==============================================================================
+#define ASM_EXTRACT_ANGLE_1(ACC) \
+    "ldr.w %[rVal], [%[p]], #32 \n"           /* Load sample */ \
+    "sbfx %[rI], %[rVal], #0, #12 \n"         /* Extract I (Sign extended) */ \
+    "sbfx %[rQ], %[rVal], #12, #12 \n"        /* Extract Q (Sign extended) */ \
+    "mul %[rT1], %[rI], %[rI] \n"             /* rT1 = I^2 */ \
+    "mul %[rT2], %[rQ], %[rQ] \n"             /* rT2 = Q^2 */ \
+    "cmp %[rT2], %[rT1], lsr #2 \n"           /* C = Q2 >= 0.25 I2 */ \
+    "adc %[rT3], %[rZ], %[rZ] \n"             /* sum = C */ \
+    "cmp %[rT2], %[rT1] \n"                   /* C = Q2 >= I2 */ \
+    "adc %[rT3], %[rT3], %[rZ] \n"            /* sum += C */ \
+    "cmp %[rT2], %[rT1], lsl #2 \n"           /* C = Q2 >= 4.0 I2 */ \
+    "adc %[rT3], %[rT3], %[rZ] \n"            /* sum += C (rT3 is now magnitude 0-3) */ \
+    "eors %[rVal], %[rI], %[rQ] \n"           /* rVal = I ^ Q (Sets N flag if signs differ) */ \
+    "it mi \n"                                /* If N flag is set (signs differ) */ \
+    "eormi %[rT3], %[rT3], #7 \n"             /* sum = 7 - sum (Flips magnitude direction) */ \
+    "ubfx %[rVal], %[rQ], #31, #1 \n"         /* rVal = Qs (0 or 1) */ \
+    "orr %[rT3], %[rT3], %[rVal], lsl #3 \n"  /* Angle = sum | (Qs << 3) */ \
+    "lsr " ACC ", " ACC ", #4 \n"             /* Shift accumulator */ \
+    "orr " ACC ", " ACC ", %[rT3], lsl #28 \n" /* Insert nibble */
+
+#define ASM_PROCESS_ANGLE_8 \
+    "mov %[Acc], #0 \n" \
+    ASM_EXTRACT_ANGLE_1("%[Acc]") ASM_EXTRACT_ANGLE_1("%[Acc]") ASM_EXTRACT_ANGLE_1("%[Acc]") ASM_EXTRACT_ANGLE_1("%[Acc]") \
+    ASM_EXTRACT_ANGLE_1("%[Acc]") ASM_EXTRACT_ANGLE_1("%[Acc]") ASM_EXTRACT_ANGLE_1("%[Acc]") ASM_EXTRACT_ANGLE_1("%[Acc]") \
+    "str %[Acc], [%[out_buf]], #4 \n"
+
+// ==============================================================================
+
 __attribute__((noinline, optimize("no-unroll-loops")))
 void process_and_push_frame(const uint32_t* stream_buf, uint32_t* out_buf) {
-    uint32_t AccA, AccB, rVal, rI, rQ, rT1, rT2;
-    const uint32_t* p = stream_buf;
+    uint32_t Acc, rVal, rI, rQ, rT1, rT2, rT3;
     uint32_t rZ = 0;
-    
+    const uint32_t* p = stream_buf;
     uint32_t* out = out_buf;
 
 #ifdef DEBUG_USB
-    uint32_t timestamps[16];
+    uint32_t timestamps[10];
 #endif
 
-    // Generate exactly 960 bytes of pure samples linearly.
-    // 80 blocks * 12 bytes = 960 bytes.
-    for (int j = 0; j < 16; j++) {
-        for (int i = 0; i < 5; i++) {
-            __asm__ volatile ( 
-                ASM_PROCESS_32 
-                :[AccA]"=&r"(AccA), [AccB]"=&r"(AccB),[rVal]"=&r"(rVal),[rI]"=&r"(rI),[rQ]"=&r"(rQ),[rT1]"=&r"(rT1),[rT2]"=&r"(rT2),[p]"+r"(p),[out_buf]"+r"(out) 
-                :[rZ]"r"(rZ) 
-                :"cc", "memory" 
-            );
+    for (int j = 0; j < 10; j++) {
+        for (int i = 0; i < 25; i++) {
+            if(gs_streaming_angle) {
+                __asm__ volatile (
+                    ASM_PROCESS_ANGLE_8
+                    :[Acc]"=&r"(Acc), [rVal]"=&r"(rVal), [rI]"=&r"(rI), [rQ]"=&r"(rQ),
+                     [rT1]"=&r"(rT1), [rT2]"=&r"(rT2), [rT3]"=&r"(rT3), [p]"+r"(p), [out_buf]"+r"(out)
+                    :[rZ]"r"(rZ)
+                    :"cc", "memory"
+                );
+            }
+            else {
+                __asm__ volatile (
+                    ASM_PROCESS_IQ_8
+                    :[Acc]"=&r"(Acc), [rVal]"=&r"(rVal), [rI]"=&r"(rI), [rQ]"=&r"(rQ), [p]"+r"(p), [out_buf]"+r"(out)
+                    ::"cc", "memory"
+                );
+            }
         }
 
 #ifdef DEBUG_USB
-        // Snapshot the timer AFTER every 60 bytes generated
+        // Snapshot the timer AFTER every 100 bytes generated
         timestamps[j] = DWT->CYCCNT >> 6;
 #endif
-
     }
 
 #ifdef DEBUG_USB
-    // Overwrite the first 4 bytes of every 64-byte chunk (15 chunks total)
-    for (int b = 0; b < 15; b++) {
+    // Overwrite the first 4 bytes of every 100-byte chunk (10 chunks total)
+    for (int b = 0; b < 10; b++) {
         uint32_t sync_word = (b == 0) ? 0x55BB : 0x55AA;
-        out_buf[b * 16] = ((timestamps[b] & 0xFFFF) << 16) | sync_word;
+        out_buf[b * 25] = ((timestamps[b] & 0xFFFF) << 16) | sync_word;
     }
 #endif
 }
@@ -406,8 +418,8 @@ void iqcapture_stream(int freq) {
     nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPSTART);
     nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
 
-    // 20,480 samples perfectly produces 960 bytes of pure 3-bit samples (1.28ms pacing)
-    int streambuf_size = 20480; 
+    // 16,000 samples perfectly produces 1000 bytes of 4-bit samples (Exactly 1.00ms pacing)
+    int streambuf_size = 16000;
     uint32_t *capture_buf = iq_buf;
     uint32_t *process_buf = NULL;
     
@@ -420,7 +432,7 @@ void iqcapture_stream(int freq) {
 
     while(gs_streaming) {
 
-        // Radio captures at 1.28ms
+        // Radio captures at 1.00ms
         if (nrf_radio_event_check(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND)) {
             nrf_radio_event_clear(NRF_RADIO, RFX_RADIO_EVENT_IQCAPEND);
 
@@ -436,24 +448,24 @@ void iqcapture_stream(int freq) {
             write_idx = (write_idx + 1) & 3; // Advance modulo 4
         }
 
-        // keep USB endpoint primed (1.00ms)
+        // keep USB endpoint primed (1.00ms intervals)
         if (tud_vendor_mounted() && !usbd_edpt_busy(0, NRF_USB_EP_IN_ISO)) {
             if (read_idx != write_idx) {
-                // Buffer has data, Queue the 960 bytes.
-                usbd_edpt_xfer(0, NRF_USB_EP_IN_ISO, (uint8_t*)usb_ring_buf[read_idx], 960, false);
+                // Buffer has data, Queue the 1000 bytes.
+                usbd_edpt_xfer(0, NRF_USB_EP_IN_ISO, (uint8_t*)usb_ring_buf[read_idx], 1000, false);
                 read_idx = (read_idx + 1) & 3; // Advance modulo 4
             }
             else {
                 // send full dummy frame to keep the flow going
                 int last_idx = (read_idx + 3) & 3;
                 usb_ring_buf[last_idx][0] = (usb_ring_buf[last_idx][0] & 0xFFFF0000) | 0x55DD;
-                usbd_edpt_xfer(0, NRF_USB_EP_IN_ISO, (uint8_t*)usb_ring_buf[last_idx], 960, false);
+                usbd_edpt_xfer(0, NRF_USB_EP_IN_ISO, (uint8_t*)usb_ring_buf[last_idx], 1000, false);
             }
         }
 
         // lower priority tasks, stop these when the IQ capture is about to end
-        // 1600 cycles is 25us
-        if((DWT->CYCCNT - start_capture) < (81920 - 1600)) {
+        // 1600 cycles is 25us. (1ms = 64,000 cycles)
+        if((DWT->CYCCNT - start_capture) < (64000 - 1600)) {
             tud_task();
 
             if (gs_usb_cmd == NRF_CMD_RADIO_STOP) { 
@@ -493,6 +505,7 @@ void usb_cmd_handler() {
             break;
         case NRF_CMD_IQCAPTURE_STREAM:
             freq = 2400 + gs_usb_buf[1];
+            gs_streaming_angle = gs_usb_buf[2];
             gs_streaming = 1;
             iqcapture_stream(freq);
             break;

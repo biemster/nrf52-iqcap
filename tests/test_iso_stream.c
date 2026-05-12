@@ -12,25 +12,25 @@
 #define PID 0x4000
 #define EP_IN_ISO 0x88
 #define EP_OUT_CMD 0x01
-#define PKT_SIZE 960
+#define PKT_SIZE 1000
 
 #define NUM_XFERS 16
 #define PKTS_PER_XFER 8
-#define STREAM_BUF_SIZE (960 * 100)
+#define STREAM_BUF_SIZE (1000 * 100)
 
 static volatile int keep_running = 1;
 static libusb_context *ctx = NULL;
 
-static int count_960 = 0;
-static int drops_960 = 0;
-static double sum_960 = 0;
-static int min_960 = 999999;
-static int max_960 = 0;
+static int count_1000 = 0;
+static int drops_1000 = 0;
+static double sum_1000 = 0;
+static int min_1000 = 999999;
+static int max_1000 = 0;
 
-static int count_64 = 0;
-static double sum_64 = 0;
-static int min_64 = 999999;
-static int max_64 = 0;
+static int count_100 = 0;
+static double sum_100 = 0;
+static int min_100 = 999999;
+static int max_100 = 0;
 
 static int garbage_bytes = 0;
 static int last_ts_main = -1;
@@ -53,23 +53,23 @@ static void process_frame(const uint8_t *frame) {
 	int ts_main = frame[2] | (frame[3] << 8);
 	if (last_ts_main != -1) {
 		int delta_m = (ts_main - last_ts_main) & 0xFFFF;
-		count_960++;
-		sum_960 += delta_m;
-		if (delta_m < min_960) min_960 = delta_m;
-		if (delta_m > max_960) max_960 = delta_m;
-		if (delta_m > 1800) drops_960++;
+		count_1000++;
+		sum_1000 += delta_m;
+		if (delta_m < min_1000) min_1000 = delta_m;
+		if (delta_m > max_1000) max_1000 = delta_m;
+		if (delta_m > 1800) drops_1000++;
 	}
 	last_ts_main = ts_main;
 
-	for (int b = 0; b < 15; b++) {
-		int offset = b * 64;
+	for (int b = 0; b < 10; b++) {
+		int offset = b * 100;
 		int ts_sub = frame[offset + 2] | (frame[offset + 3] << 8);
 		if (last_ts_sub != -1) {
 			int delta_s = (ts_sub - last_ts_sub) & 0xFFFF;
-			count_64++;
-			sum_64 += delta_s;
-			if (delta_s < min_64) min_64 = delta_s;
-			if (delta_s > max_64) max_64 = delta_s;
+			count_100++;
+			sum_100 += delta_s;
+			if (delta_s < min_100) min_100 = delta_s;
+			if (delta_s > max_100) max_100 = delta_s;
 		}
 		last_ts_sub = ts_sub;
 	}
@@ -87,18 +87,19 @@ static void LIBUSB_CALL xfer_cb(struct libusb_transfer *xfer) {
 			uint8_t *buf = libusb_get_iso_packet_buffer_simple(xfer, i);
 			int len = pack->actual_length;
 
-			// DIAGNOSTIC 1: Is the OS/Hardware chopping the ISO frame?
-			if (len != 960) {
+			if (len != 1000) {
 				printf("[USB Packet] Unexpected size: %d bytes (Status: %d)\n", len, pack->status);
 			}
 
 			if (stream_len + len <= STREAM_BUF_SIZE) {
 				memcpy(stream_buf + stream_len, buf, len);
 				stream_len += len;
-			} else {
+			}
+			else {
 				stream_len = 0; 
 			}
-		} else if (pack->status != LIBUSB_TRANSFER_COMPLETED && pack->status != LIBUSB_TRANSFER_TIMED_OUT) {
+		}
+		else if (pack->status != LIBUSB_TRANSFER_COMPLETED && pack->status != LIBUSB_TRANSFER_TIMED_OUT) {
 			printf("[USB Frame Error] Packet slot %d failed with status %d\n", i, pack->status);
 			stream_len = 0;
 		}
@@ -106,33 +107,30 @@ static void LIBUSB_CALL xfer_cb(struct libusb_transfer *xfer) {
 
 	// Process sliding window with granular garbage mapping
 	int p = 0;
-	while (p + 960 <= stream_len) {
+	while (p + 1000 <= stream_len) {
 		// 1. Check for a VALID data frame (starts with 0xBB 0x55)
 		if (stream_buf[p] == 0xBB && stream_buf[p+1] == 0x55 &&
-			stream_buf[p+64] == 0xAA && stream_buf[p+65] == 0x55 &&
-			stream_buf[p+128] == 0xAA && stream_buf[p+129] == 0x55) {
+			stream_buf[p+100] == 0xAA && stream_buf[p+101] == 0x55 &&
+			stream_buf[p+200] == 0xAA && stream_buf[p+201] == 0x55) {
 			
 			process_frame(&stream_buf[p]);
-			p += 960;
-			
+			p += 1000;
 		} 
 		// 2. Check for a DUMMY padding frame (starts with 0xDD 0x55)
 		else if (stream_buf[p] == 0xDD && stream_buf[p+1] == 0x55 &&
-				 stream_buf[p+64] == 0xAA && stream_buf[p+65] == 0x55 &&
-				 stream_buf[p+128] == 0xAA && stream_buf[p+129] == 0x55) {
+				 stream_buf[p+100] == 0xAA && stream_buf[p+101] == 0x55 &&
+				 stream_buf[p+200] == 0xAA && stream_buf[p+201] == 0x55) {
 			
 			// Silently discard the dummy frame and advance
-			p += 960;
-			
+			p += 1000;
 		} 
 		// 3. Misalignment. Hunt down where the NEXT frame begins.
 		else {
 			int next_sync_idx = -1;
-			for (int s = p + 1; s + 960 <= stream_len; s++) {
-				// Allow re-syncing on either a Valid (0xBB) or Dummy (0xDD) frame
+			for (int s = p + 1; s + 1000 <= stream_len; s++) {
 				if ((stream_buf[s] == 0xBB || stream_buf[s] == 0xDD) && stream_buf[s+1] == 0x55 &&
-					stream_buf[s+64] == 0xAA && stream_buf[s+65] == 0x55 &&
-					stream_buf[s+128] == 0xAA && stream_buf[s+129] == 0x55) {
+					stream_buf[s+100] == 0xAA && stream_buf[s+101] == 0x55 &&
+					stream_buf[s+200] == 0xAA && stream_buf[s+201] == 0x55) {
 					next_sync_idx = s;
 					break;
 				}
@@ -143,7 +141,8 @@ static void LIBUSB_CALL xfer_cb(struct libusb_transfer *xfer) {
 				printf("[Stream Error] Skipped %d bytes of garbage to re-sync\n", garbage_len);
 				garbage_bytes += garbage_len;
 				p = next_sync_idx; // Snap alignment directly to the next frame
-			} else {
+			}
+			else {
 				// No valid sync words found in the remainder of this buffer.
 				// Stop parsing and wait for more USB data to append.
 				break;
@@ -187,7 +186,7 @@ int main() {
 	}
 
 	printf("[+] Starting stream on 2402 MHz...\n");
-	uint8_t cmd_start[4] = {0xcc, 2, 0x00, 0x01};
+	uint8_t cmd_start[4] = {0xcc, 2, 0x01, 0x01};
 	int transferred;
 	libusb_bulk_transfer(dev, EP_OUT_CMD, cmd_start, sizeof(cmd_start), &transferred, 1000);
 
@@ -216,26 +215,26 @@ int main() {
 		if (now - last_report >= 0.5) {
 			printf("\n--- USB Timing Report (%.2fs) ---\n", now - last_report);
 			
-			if (count_960 > 0) {
-				printf("960B ISO Frames : Count=%4d | Drops=%3d | Avg=%6.1f µs | Min=%5d µs | Max=%5d µs\n",
-					   count_960, drops_960, sum_960 / count_960, min_960, max_960);
+			if (count_1000 > 0) {
+				printf("1000B ISO Frames : Count=%4d | Drops=%3d | Avg=%6.1f µs | Min=%5d µs | Max=%5d µs\n",
+					   count_1000, drops_1000, sum_1000 / count_1000, min_1000, max_1000);
 			} else {
-				printf("960B ISO Frames : No data\n");
+				printf("1000B ISO Frames : No data\n");
 			}
 
-			if (count_64 > 0) {
-				printf(" 64B Sub-Frames : Count=%4d |           | Avg=%6.1f µs | Min=%5d µs | Max=%5d µs\n",
-					   count_64, sum_64 / count_64, min_64, max_64);
+			if (count_100 > 0) {
+				printf(" 100B Sub-Frames : Count=%4d |           | Avg=%6.1f µs | Min=%5d µs | Max=%5d µs\n",
+					   count_100, sum_100 / count_100, min_100, max_100);
 			} else {
-				printf(" 64B Sub-Frames : No data\n");
+				printf(" 100B Sub-Frames : No data\n");
 			}
 
 			if (garbage_bytes > 0) {
 				printf("Unmatched Garbage Bytes Discarded: %d\n", garbage_bytes);
 			}
 
-			count_960 = 0; drops_960 = 0; sum_960 = 0; min_960 = 999999; max_960 = 0;
-			count_64 = 0; sum_64 = 0; min_64 = 999999; max_64 = 0;
+			count_1000 = 0; drops_1000 = 0; sum_1000 = 0; min_1000 = 999999; max_1000 = 0;
+			count_100 = 0; sum_100 = 0; min_100 = 999999; max_100 = 0;
 			garbage_bytes = 0;
 			last_report = now;
 		}
