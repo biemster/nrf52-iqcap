@@ -34,9 +34,18 @@ The `const_plot.py` script will show a constellation plot of the captured data.
 #### Streaming mode
 
 There is experimental support for a continuous streaming mode, where the 12 bit 16Msps samples are decimated
-to 3 bit angles at 2Msps, to fit in the USB data rate budget at about 750 kB/s.
-Two test script are included in the `tests/` directory, and a GNURadio source block is in development
-(and the possibility of extending the 3 bit angle to 4 bits, turning it into more regular 2 bit IQ samples).
+to 4 bit angles or 2 bit I/Q samples at 2Msps, to fit in the USB data rate budget at about 1000 kB/s.
+Two test script are included in the `tests/` directory, and a GNURadio source block can be found in `gr-nrf52/`.
+To build this gnuradio block you need to execute the following in that directory:
+```sh
+mkdir build
+cd build
+cmake -DCMAKE_INSTALL_PREFIX=$(gnuradio-config-info --prefix) ..
+make -j4
+sudo make install
+sudo ldconfig
+```
+An example flowgraph can be found in `nrf52_demod.grc`.
 
 ## Credits
 

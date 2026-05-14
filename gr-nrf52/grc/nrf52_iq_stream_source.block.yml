@@ -1,0 +1,33 @@
+id: nrf52_iq_stream_source
+label: nRF52 IQ/Angle Source
+category: '[nrf52]'
+
+templates:
+  imports: from gnuradio import nrf52
+  make: nrf52.iq_stream_source(${freq}, ${angle_mode})
+
+parameters:
+- id: freq
+  label: Frequency (MHz)
+  dtype: int
+  default: 2402
+
+- id: angle_mode
+  label: On-device angle calculation
+  dtype: bool
+  default: True
+  options: [True, False]
+  option_labels: ['4-Bit Angle (DSP)', '2-Bit I/Q']
+
+outputs:
+- label: out
+  domain: stream
+  dtype: complex
+
+asserts:
+- ${freq >= 2400}
+- ${freq <= 2500}
+
+#  'file_format' specifies the version of the GRC yml format used in the file
+#  and should usually not be changed.
+file_format: 1
