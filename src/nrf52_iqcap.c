@@ -9,6 +9,7 @@
 #include "device/usbd_pvt.h"
 
 // #define DEBUG_USB
+#define GAIN_16X
 
 #define NRF_USB_EP_IN_BULK       0x81 
 #define NRF_USB_EP_IN_ISO        0x88 // for the USB DMA feed, keep those in line with src/usb_descriptors.c and the python scripts
@@ -318,6 +319,15 @@ void send_iq_samples(uint32_t *buf, int nsamp) {
 // ==============================================================================
 // ASSEMBLY A: 2-BIT I/Q EXTRACTION
 // ==============================================================================
+#ifdef GAIN_16X
+#define ASM_EXTRACT_IQ_1(ACC) \
+    "ldr.w %[rVal], [%[p]], #32 \n"        \
+    "ubfx %[rI], %[rVal], #6, #2 \n"       /* Was #10. Shift down 4 bits (16x Gain) */ \
+    "ubfx %[rQ], %[rVal], #18, #2 \n"      /* Was #22. Shift down 4 bits (16x Gain) */ \
+    "orr %[rI], %[rI], %[rQ], lsl #2 \n"   \
+    "lsr " ACC ", " ACC ", #4 \n"          \
+    "orr " ACC ", " ACC ", %[rI], lsl #28 \n"
+#else
 #define ASM_EXTRACT_IQ_1(ACC) \
     "ldr.w %[rVal], [%[p]], #32 \n"        \
     "ubfx %[rI], %[rVal], #10, #2 \n"      \
@@ -325,6 +335,7 @@ void send_iq_samples(uint32_t *buf, int nsamp) {
     "orr %[rI], %[rI], %[rQ], lsl #2 \n"   \
     "lsr " ACC ", " ACC ", #4 \n"          \
     "orr " ACC ", " ACC ", %[rI], lsl #28 \n"
+#endif
 
 #define ASM_PROCESS_IQ_8 \
     "mov %[Acc], #0 \n" \
